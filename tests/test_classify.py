@@ -27,6 +27,7 @@ EXPECTED = {
     "Sourcey": ("suggested", "Duplicate files in one folder", None),
     "Comp": ("other", "Same song on another album", None),
     "Dlx": ("suggested", "Complete album covers a partial copy", "Album (2019)"),
+    "Hymnal": ("suggested", "Complete album covers a partial copy", "Hymns - Take the World, but Give Me Jesus (2010)"),
 }
 
 
@@ -281,3 +282,39 @@ def test_same_album(app_mod, a, b):
 def test_partial_deluxe_says_why(loose):
     assert loose["Dlx"]["detail"].startswith(
         "Album (Deluxe) (2019) would normally win as the bigger edition, but only 1 of its tracks is here")
+
+
+def test_partial_copy_states_album_size(loose):
+    c = loose["Hymnal"]
+    assert "Take the World, but Give Me Jesus (2014) holds 2 of the album's 4 tracks" in c["detail"]
+    tidarr = next(e for e in c["editions"] if e["folder"].endswith("Take the World, but Give Me Jesus (2014)"))
+    assert (tidarr["tracks"], tidarr["album_total"]) == (2, 4)
+
+
+@pytest.mark.parametrize("tags,want", [
+    ({"totaltracks": "9"}, 9), ({"tracktotal": "12"}, 12), ({"tracknumber": "3/9"}, 9),
+    ({"tracknumber": "3"}, None), ({}, None),
+])
+def test_track_total(app_mod, tags, want):
+    assert app_mod.track_total({"tags": tags}) == want
+
+
+def test_untouched_edition_beats_lidarr_retag(app_mod):
+    """Two complete editions, identical audio, both labelled Tidarr: the one
+    Lidarr didn't retag wins even though the retag added more tags."""
+    def f(folder, retag):
+        return {"folder": folder, "lossless": True, "bits": 16, "rate": 44100, "kbps": 900,
+                "retag": retag}
+    eds = [
+        {"folder": "A/Pure (2014)", "artist": "A", "album": "Take the World, but Give Me Jesus", "tracks": 9,
+         "deluxe": False, "source": "Tidarr", "untouched": 1.0, "tag_count": 15, "year": "2014",
+         "album_total": 9},
+        {"folder": "A/Hymns (2010)", "artist": "A", "album": "Hymns: Take the World, but Give Me Jesus", "tracks": 9,
+         "deluxe": False, "source": "Tidarr (SABnzbd) via Lidarr", "untouched": 0.0,
+         "tag_count": 30, "year": "2010", "album_total": 9},
+    ]
+    rows = [[f("A/Pure (2014)", None), f("A/Hymns (2010)", {"date": "x"})]]
+    evs = [{"damaged": False, "isrc_conflict": False, "spread": 0, "confirmed": "identical",
+            "identical": True, "differs": False, "has_isrc": False}]
+    kind, reason, _, keeper = app_mod.classify(eds, rows, evs, single=False)
+    assert (kind, reason, keeper) == ("suggested", "Identical audio", "A/Pure (2014)")

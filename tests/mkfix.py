@@ -162,6 +162,15 @@ def build(root):
            "Album", "2019", t)
     mk(2402, FL, 5, "Dlx/Album (Deluxe) (2019)/02 B.flac", "B", "Dlx", "Dlx",
        "Album (Deluxe)", "2019", 2)
+    # Lidarr's complete album (its tags say 4 tracks) vs a Tidarr folder with
+    # 2 of them under Tidal's shorter album name.
+    for t, title in [(1, "Love"), (2, "Great"), (3, "Rock"), (4, "World")]:
+        mk(2500 + t, FL, 5, f"Hymnal/Hymns - Take the World, but Give Me Jesus (2010)/{t:02d} {title}.flac", title,
+           "Hymnal", "Hymnal", "Hymns: Take the World, but Give Me Jesus", "2010", t, TOTALTRACKS="4")
+    for t, title in [(1, "Love"), (2, "Great")]:
+        mk(2500 + t, FL, 5, f"Hymnal/Take the World, but Give Me Jesus (2014)/{t:02d} {title}.flac", title,
+           "Hymnal", "Hymnal", "Take the World, but Give Me Jesus", "2014", t, compatible_brands="mp41dashcmfc",
+           major_brand="iso8")
 
 
 if __name__ == "__main__":

@@ -502,7 +502,7 @@ function edHtml(c, e, i, rows) {
     <div class="ed-meta">
       <span class="q ${e.tier}"><b>${esc(e.format)}</b><span>${esc(e.detail)}</span></span>
       <span>${e.year || "No year tag"}</span>
-      <span>${plural(e.tracks, "track")} in folder${e.format_count && e.format_count < e.tracks ? `, ${e.format_count} in this format` : ""}</span>
+      <span>${plural(e.tracks, "track")} in folder${e.format_count && e.format_count < e.tracks ? `, ${e.format_count} in this format` : ""}${e.album_total && e.tracks < e.album_total ? `, album has ${e.album_total}` : ""}</span>
       ${e.deluxe ? "<span>Deluxe or expanded</span>" : ""}
     </div>
     <div class="ed-meta"><span>${esc(e.source)}</span><span>Added ${fmtDate(e.added)}</span></div>
