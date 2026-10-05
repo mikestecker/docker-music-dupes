@@ -16,6 +16,7 @@ EXPECTED = {
     "Kutless": ("suggested", "Deluxe edition covers the standard",
                 "Hearts Of The Innocent (Special Edition) (2006)"),
     "Lynyrd Skynyrd": ("manual", "Track lengths differ", None),
+    "Countryman": ("manual", "Track lengths differ", None),
     "Mixtape": ("suggested", "Duplicate files in one folder", None),
 }
 
@@ -71,3 +72,58 @@ def test_keeps_the_copy_that_fits_the_folder(loose):
     files = loose["Mixtape"]["rows"][0]["files"]
     assert [f["name"] for f in files if f["suggested"]] == ["03 Graveyard.flac"]
     assert [f["name"] for f in files if f["stray"]] == ["03 Graveyard.flac"]
+
+
+@pytest.fixture(scope="module")
+def easy(loose):
+    files = loose["Countryman"]["rows"][0]["files"]
+    return {f["name"]: f for f in files}
+
+
+def test_44_vs_48_khz_isnt_lower_quality(easy):
+    assert {f["detail"] for f in easy.values()} == {"16/44.1", "16/48"}
+    assert all(f["quality"] == "best" for f in easy.values())
+
+
+def test_fit_line_says_why(easy):
+    album, stray = easy["02-05 You Make It Easy.flac"], easy["20 You Make It Easy.flac"]
+    assert album["fit"] == {"tone": "good", "text": "Named and added like the rest of the folder"}
+    assert stray["fit"]["tone"] == "warn"
+    assert stray["fit"]["text"] == ('Added 11 days after the rest of the folder, '
+                                    'named "20 Title" though its tags say 2-5')
+    assert stray["stray"] and not album["stray"]
+
+
+def test_select_all_removable_keeps_the_album_copy(easy):
+    assert [n for n, f in easy.items() if f["keep_pref"]] == ["02-05 You Make It Easy.flac"]
+    assert not any(f["suggested"] for f in easy.values())  # still Review, nothing picked
+
+
+def test_edition_header_describes_the_album(loose):
+    e = loose["Countryman"]["editions"][0]
+    assert (e["format"], e["detail"], e["tracks"], e["format_count"]) == ("FLAC", "16/44.1", 5, 4)
+    assert e["added"] < 1759000000  # Sep 22 batch, not the Oct 3 stray
+
+
+def test_length_chip_has_one_decimal(loose):
+    chips = [c["text"] for c in loose["Countryman"]["rows"][0]["evidence"]]
+    assert "Length off by 3.5s" in chips
+
+
+@pytest.mark.parametrize("name,disc,track,want", [
+    ("02-05 You Make It Easy.flac", 2, 5, True), ("20 You Make It Easy.flac", 2, 5, False),
+    ("05 Song.flac", 1, 5, True), ("205 Song.flac", 2, 5, True), ("1. Song.flac", 1, 1, True),
+    ("03 - Song.flac", 1, 3, True), ("929.flac", 1, 16, None), ("Song.flac", 1, 3, None),
+    ("1999 Song.flac", 1, 3, None), ("04 Song.flac", 1, None, None),
+])
+def test_name_agrees(app_mod, name, disc, track, want):
+    f = {"rel": f"A/B/{name}", "disc": disc, "track": track}
+    assert app_mod.name_agrees(f) is want
+
+
+def test_quality_class(app_mod):
+    q = lambda bits, rate: app_mod.qclass({"lossless": True, "bits": bits, "rate": rate, "kbps": 0})
+    assert q(16, 44100) == q(16, 48000)
+    assert q(24, 48000) > q(16, 48000)
+    assert q(24, 96000) > q(24, 48000)
+    assert q(16, 44100) > app_mod.qclass({"lossless": False, "bits": 0, "rate": 44100, "kbps": 320})
