@@ -17,6 +17,7 @@ Self-hosted duplicate-music finder, shipped as a Docker image. README.md is the 
 - Lossless first: hi-res beats CD quality, lossless beats lossy. 44.1 and 48 kHz at the same bit depth count as equal (`qclass`).
 - Different release years: keep both unless raw data proves the same audio; then suggest which to remove.
 - Deluxe/expanded over standard; a complete album over a partial copy of it.
+- The same recording on different albums (album vs single, compilation, best-of) is not a duplicate: both stay ("Other albums", nothing selected). Edition rules only run when every edition is the same album (`same_album`).
 - Different album artists, or anything the app can't confirm: Review, nothing selected, with diffs, raw tags and the player.
 - Within a folder, keep the copy that fits the folder (naming, download batch, filename agrees with its tags).
 - Show which pipeline each file came from (Lidarr history, Tidarr container tags, user rules).

@@ -25,6 +25,8 @@ EXPECTED = {
     "Peppy": ("suggested", "Duplicate files in one folder", None),
     "Kaleido": ("suggested", "Duplicate files in one folder", None),
     "Sourcey": ("suggested", "Duplicate files in one folder", None),
+    "Comp": ("other", "Same song on another album", None),
+    "Dlx": ("suggested", "Complete album covers a partial copy", "Album (2019)"),
 }
 
 
@@ -245,3 +247,37 @@ def test_untouched_tags_beat_a_lidarr_retag(app_mod):
                 lossless=True, bits=16, rate=44100, kbps=900)
     retagged = dict(base, retag={"date": "2026-10-01", "fields": [], "scrubbed": True})
     assert app_mod.keep_rank(base) > app_mod.keep_rank(retagged)
+
+
+def test_other_albums_select_nothing(loose):
+    c = loose["Comp"]
+    assert len(c["editions"]) == 3
+    assert not any(f["suggested"] for r in c["rows"] for f in r["files"])
+    assert not any(e["keep"] for e in c["editions"])
+
+
+@pytest.mark.parametrize("a,b", [
+    ("Nevermind", "The Very Best"), ("1,000 Names", "Ways"),
+    ("Creature Comforts", "Everything at Once"), ("B-Sides", "Cannonball"),
+    ("Bottle Rocket", "Smashes - The Best of Guardian"), ("JOY INVINCIBLE", "Christian Radio"),
+    ("3 + 7", "Don't Know If I Believe It"), ("Greatest Hits - Chapter One", "Stronger"),
+    ("Change Your World", "The First Decade (1983\u20131993)"),
+])
+def test_different_albums(app_mod, a, b):
+    assert not app_mod.same_album(a, b)
+
+
+@pytest.mark.parametrize("a,b", [
+    ("Hearts of the Innocent", "Hearts Of The Innocent (Special Edition)"),
+    ("Rec", "Rec (Deluxe)"), ("Persona", "Persona (Extended)"),
+    ("Fractured Heart", "Fractioned Heart"), ("Pronounced", "pronounced"),
+    ("Abbey Road", "Abbey Road (2019 Remaster)"), ("Abbey Road", "Abbey Road - Remastered 2009"),
+    ("I Know a Ghost", "I Know A Ghost"), ("Now (2019)", "Now"),
+])
+def test_same_album(app_mod, a, b):
+    assert app_mod.same_album(a, b)
+
+
+def test_partial_deluxe_says_why(loose):
+    assert loose["Dlx"]["detail"].startswith(
+        "Album (Deluxe) (2019) would normally win as the bigger edition, but only 1 of its tracks is here")

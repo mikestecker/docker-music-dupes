@@ -75,7 +75,7 @@
   .reason { display: inline-block; margin-top: 8px; font-size: 13px; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1.5px solid currentColor; }
   .reason.suggested { color: var(--keep); }
   .reason.manual { color: var(--warn); }
-  .reason.kept { color: var(--muted); }
+  .reason.kept, .reason.other { color: var(--muted); }
   .detail { margin: 6px 0 0; color: var(--muted); font-size: 14px; max-width: 78ch; }
   .album-side { display: flex; flex-direction: column; align-items: end; gap: 8px; }
   .album-stats { font-size: 13px; color: var(--muted); display: flex; gap: 12px; }
@@ -213,6 +213,7 @@
       <div class="sections" role="tablist" aria-label="Result sections">
         <button role="tab" data-sec="suggested">Suggested<span class="n" id="n-suggested"></span></button>
         <button role="tab" data-sec="manual">Review<span class="n" id="n-manual"></span></button>
+        <button role="tab" data-sec="other">Other albums<span class="n" id="n-other"></span></button>
         <button role="tab" data-sec="kept">Kept both<span class="n" id="n-kept"></span></button>
       </div>
       <span class="spacer"></span>
@@ -267,6 +268,7 @@ const PAUSE = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1h2v8H2zM
 const SECTION_HELP = {
   suggested: "The tags make it clear which copies are redundant, so those are pre-selected and struck through. Open an album to check the evidence behind each track.",
   manual: "These need your ears. Nothing is selected. Play copies side by side, compare tags, then select what to remove or choose Keep both.",
+  other: "The same recording on different releases, like an album and a single, a compilation or a best-of. They're kept, so nothing is selected. Select a copy yourself if you don't want a song twice.",
   kept: "Albums you chose to keep. They stay out of the other lists on future scans until you show them again.",
 };
 const PAGE = 30;
@@ -410,7 +412,7 @@ function matches(c) {
 function renderAll() {
   const any = S.clusters.some(c => liveRows(c).length);
   $("#toolbar").hidden = !any;
-  for (const sec of ["suggested", "manual", "kept"]) {
+  for (const sec of ["suggested", "manual", "other", "kept"]) {
     $(`#n-${sec}`).textContent = countIn(sec);
     $(`[data-sec="${sec}"]`).setAttribute("aria-selected", S.section === sec);
   }
@@ -431,6 +433,7 @@ function renderList() {
     const empty = {
       suggested: "Nothing left to clean up here. Check Review for albums that need a decision.",
       manual: "Nothing needs a decision right now.",
+      other: "No songs show up on more than one release.",
       kept: "You haven't kept any albums yet. Choose Keep both on an album in Review to park it here.",
     };
     $("#clusters").innerHTML = `<p class="empty">${S.query || S.reason ? "Nothing matches that filter." : empty[S.section]}</p>`;
@@ -469,7 +472,7 @@ function cardHtml(c, ci) {
           <button class="btn small" data-act="none" ${sel.length ? "" : "disabled"}>Deselect all</button>
           ${sec === "kept"
             ? `<button class="btn small" data-act="unkeep">Show again</button>`
-            : `<button class="btn small" data-act="keep">Keep both</button>`}
+            : sec === "other" ? "" : `<button class="btn small" data-act="keep">Keep both</button>`}
         </div>
       </div>
     </div>
