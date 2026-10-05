@@ -836,6 +836,14 @@ def inside(path, root):
     return os.path.commonpath([path, root]) == root
 
 
+def check_dirs(music, qdir):
+    """Refuse a quarantine folder that is the library or contains it: we'd write
+    an .ndignore of "*" over the whole library and Navidrome would hide it."""
+    if inside(music, qdir):
+        raise SystemExit(f"QUARANTINE_DIR ({qdir}) can't be the music folder ({music}) "
+                         "or contain it. Leave it unset to use MUSIC_DIR/.dupe-quarantine.")
+
+
 def library_path(rel):
     """Absolute path for a library-relative one. Refuses paths outside the
     library, inside quarantine, or reached through a symlink: realpath() would
@@ -872,6 +880,7 @@ MLOCK = threading.Lock()
 
 # ---------- app ----------
 
+check_dirs(MUSIC, QDIR)
 os.makedirs(CONFIG, exist_ok=True)
 os.makedirs(QDIR, exist_ok=True)
 _ndignore = os.path.join(QDIR, ".ndignore")

@@ -238,3 +238,25 @@ def test_identical_copies_still_suggested(scan, lib, album):
     two_copies(lib, album)
     c = cluster(scan, lib, album)
     assert (c["kind"], c["reason"]) == ("suggested", "Duplicate files in one folder")
+
+
+# ---------- #7 quarantine folder misconfiguration ----------
+
+@pytest.mark.parametrize("qdir", ["{m}", "{base}"])
+def test_quarantine_dir_cant_cover_library(tmp_path, qdir):
+    import subprocess
+    import sys
+    music = tmp_path / "music"
+    music.mkdir()
+    env = dict(os.environ, MUSIC_DIR=str(music), CONFIG_DIR=str(tmp_path / "config"),
+               QUARANTINE_DIR=qdir.format(m=music, base=tmp_path))
+    app_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
+    r = subprocess.run([sys.executable, "-c", "import app"], cwd=app_dir, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode != 0 and "QUARANTINE_DIR" in r.stderr
+    assert not (music / ".ndignore").exists() and not (tmp_path / ".ndignore").exists()
+
+
+def test_quarantine_dir_inside_library_is_fine(app_mod):
+    app_mod.check_dirs("/music", "/music/.dupe-quarantine")
+    app_mod.check_dirs("/music", "/elsewhere")
