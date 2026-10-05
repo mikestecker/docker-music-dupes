@@ -18,6 +18,7 @@ services:
       - TZ=${TZ:-UTC}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
       - PREFER_SOURCES=${PREFER_SOURCES:-Tidarr}
+      - PREFER_REMASTERS=${PREFER_REMASTERS:-true}
       - LIDARR_URL=${LIDARR_URL:-}
       - LIDARR_API_KEY=${LIDARR_API_KEY:-}
       - LIDARR_MUSIC_ROOT=${LIDARR_MUSIC_ROOT:-/data/media/music}

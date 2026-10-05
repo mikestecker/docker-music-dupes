@@ -27,6 +27,7 @@ EXPECTED = {
     "Sourcey": ("suggested", "Duplicate files in one folder", None),
     "Comp": ("other", "Same song on another album", None),
     "Dlx": ("suggested", "Complete album covers a partial copy", "Album (2019)"),
+    "Remas": ("suggested", "Same recordings", "Album (Remastered) (1984)"),
     "Hymnal": ("suggested", "Complete album covers a partial copy", "Hymns - Take the World, but Give Me Jesus (2010)"),
 }
 
@@ -318,3 +319,17 @@ def test_untouched_edition_beats_lidarr_retag(app_mod):
             "identical": True, "differs": False, "has_isrc": False}]
     kind, reason, _, keeper = app_mod.classify(eds, rows, evs, single=False)
     assert (kind, reason, keeper) == ("suggested", "Identical audio", "A/Pure (2014)")
+
+
+def test_remaster_wins_the_tie_and_says_so(loose):
+    c = loose["Remas"]
+    assert "Kept Album (Remastered) (1984): the remastered edition." in c["detail"]
+    assert "different masters" in c["detail"]
+    assert all("Different master" in [ch["text"] for ch in r["evidence"]] for r in c["rows"])
+    assert [e["remaster"] for e in c["editions"]] == [False, True]
+
+
+def test_prefer_remasters_can_be_turned_off(app_mod, scan, monkeypatch):
+    monkeypatch.setattr(app_mod, "PREFER_REMASTERS", False)
+    c = next(c for c in scan()["clusters"] if c["artist"] == "Remas")
+    assert [e["folder"] for e in c["editions"] if e["keep"]] == ["Remas/Album (1984)"]

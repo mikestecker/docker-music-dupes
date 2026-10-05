@@ -195,6 +195,7 @@ Everything is set with environment variables. Only the mounts are required.
 |---|---|---|
 | `TZ` | `UTC` | Timezone for timestamps and quarantine batch names |
 | `PREFER_SOURCES` | `Tidarr` | When copies are otherwise equal, keep the one whose Source label contains the first of these (comma-separated, e.g. `Tidarr,Qobuz`). Matches "Tidarr" and "Tidarr (SABnzbd) via Lidarr" alike. Empty turns it off. |
+| `PREFER_REMASTERS` | `true` | When editions of one album are otherwise equal, keep the one named "Remaster(ed)". Set `false` to prefer originals (many remasters are louder and more compressed). |
 | `ALLOWED_HOSTS` | | Extra hostnames the UI answers to, comma-separated, e.g. `dupes.example.com`. IPs, single-word names (`truenas`) and `.local`/`.lan`/`.home.arpa`/`.internal` names always work. `*` turns the check off. See [Reverse proxy](#reverse-proxy). |
 | `PORT` | `8095` | Port the app listens on **inside** the container. You usually change the host side of the port mapping instead. |
 | `MUSIC_DIR` | `/music` | Library path inside the container |
@@ -295,7 +296,7 @@ Then, per album pair:
 - Any track with different ISRCs, or lengths more than 2.5s apart → Review.
 - One folder only holds tracks that are all in a more complete copy of the same album (say Tidarr grabbed three songs Lidarr already has) → suggest keeping the complete album. Every track must be within a second, and audio that's provably different is never covered.
 - One edition is deluxe/expanded/special and the other isn't, and the deluxe one is at least as complete → suggest keeping the deluxe one.
-- Every track proven identical or the same recording → suggest keeping the best quality, then the most complete, best-tagged edition.
+- Every track proven identical or the same recording → suggest keeping the best quality, then the most tracks, then your preferred source, then tags Lidarr didn't rewrite, then a remastered edition (`PREFER_REMASTERS`), then the richest tags, then the earliest year. The card names the step that decided it. When the checksums show two different masters of the same recording, tracks get a "Different master" chip and the card asks you to listen first.
 - Anything else → Review.
 
 Last check: if the edition it would keep has a lower-quality copy of any track than the one it would remove (say a CD-quality deluxe vs a hi-res standard), the whole album gets bumped to Review. When that's a partial folder holding hi-res copies of a CD-quality album, the reason says so, and the better file gets a **Replace the album's copy** button: it moves into the album under the album copy's name and the lower-quality copy goes to quarantine. Restore (or Undo) puts both back.

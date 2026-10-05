@@ -171,6 +171,13 @@ def build(root):
         mk(2500 + t, FL, 5, f"Hymnal/Take the World, but Give Me Jesus (2014)/{t:02d} {title}.flac", title,
            "Hymnal", "Hymnal", "Take the World, but Give Me Jesus", "2014", t, compatible_brands="mp41dashcmfc",
            major_brand="iso8")
+    # Two masters of one recording (same ISRCs and lengths, different audio):
+    # the remastered edition wins the tie.
+    for t, title in [(1, "Fire"), (2, "Bad")]:
+        mk(2600 + t, FL, 5, f"Remas/Album (1984)/{t:02d} {title}.flac", title, "Remas", "Remas",
+           "Album", "1984", t, f"GBRM8400000{t}")
+        mk(2610 + t, FL, 5, f"Remas/Album (Remastered) (1984)/{t:02d} {title}.flac", title,
+           "Remas", "Remas", "Album (Remastered)", "1984", t, f"GBRM8400000{t}")
 
 
 if __name__ == "__main__":

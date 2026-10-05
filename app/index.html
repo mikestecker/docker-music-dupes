@@ -504,6 +504,7 @@ function edHtml(c, e, i, rows) {
       <span>${e.year || "No year tag"}</span>
       <span>${plural(e.tracks, "track")} in folder${e.format_count && e.format_count < e.tracks ? `, ${e.format_count} in this format` : ""}${e.album_total && e.tracks < e.album_total ? `, album has ${e.album_total}` : ""}</span>
       ${e.deluxe ? "<span>Deluxe or expanded</span>" : ""}
+      ${e.remaster ? "<span>Remastered</span>" : ""}
     </div>
     <div class="ed-meta"><span>${esc(e.source)}</span><span>Added ${fmtDate(e.added)}</span></div>
     ${n > 1 ? `<label class="ed-all"><input type="checkbox" data-ed="${i}" ${fs.length && sel === fs.length ? "checked" : ""}
