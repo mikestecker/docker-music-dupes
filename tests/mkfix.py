@@ -16,18 +16,22 @@ AAC = ["-c:a", "aac", "-b:a", "256k"]
 
 
 def build(root):
-    def mk(freq, codec, dur, path, title, artist, aa, album, date, track, isrc=None):
+    def mk(freq, codec, dur, path, title, artist, aa, album, date, track, isrc=None,
+           mtime=None, **extra):
         p = os.path.join(root, path)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         md = dict(title=title, artist=artist, album_artist=aa, album=album,
                   date=date, track=str(track))
         if isrc:
             md["ISRC"] = isrc
+        md.update(extra)
         args = ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
                 "-i", f"sine=f={freq}:d={dur}"] + codec
         for k, v in md.items():
             args += ["-metadata", f"{k}={v}"]
         subprocess.run(args + [p], check=True)
+        if mtime:
+            os.utime(p, (mtime, mtime))
 
     for y in (2000, 2007):
         for t in (1, 2):
@@ -68,6 +72,15 @@ def build(root):
     mk(1300, HR, 5, "Hres/Rec (2015)/01 X.flac", "X", "Hres", "Hres", "Rec", "2015", 1, "USHR1")
     mk(1300, FL, 5, "Hres/Rec (Deluxe) (2015)/01 X.flac", "X", "Hres", "Hres", "Rec (Deluxe)", "2015", 1, "USHR1")
     mk(1301, FL, 5, "Hres/Rec (Deluxe) (2015)/02 Y.flac", "Y", "Hres", "Hres", "Rec (Deluxe)", "2015", 2)
+    # A later stray re-download in an album folder: other naming, another day,
+    # and more tags than the album's copy (which used to make it the keeper).
+    sep23, oct3 = 1758652260, 1759531620
+    for i, (d, t, title) in enumerate([(1, 1, "Ashley"), (1, 2, "Clementine"), (1, 3, "Graveyard"),
+                                       (2, 1, "Wipe Your Tears"), (2, 2, "Be Kind")]):
+        mk(1400 + i, FL, 5, f"Mixtape/Manic (2020)/{d:02d}-{t:02d} {title}.flac", title,
+           "Mixtape", "Mixtape", "Manic", "2020", t, mtime=sep23 + i, disc=str(d))
+    mk(1402, FL, 5, "Mixtape/Manic (2020)/03 Graveyard.flac", "Graveyard", "Mixtape", "Mixtape",
+       "Manic", "2020", 3, mtime=oct3, comment="tidal", label="Some Label", copyright="2020")
 
 
 if __name__ == "__main__":

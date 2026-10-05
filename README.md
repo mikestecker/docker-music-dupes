@@ -304,6 +304,8 @@ Then, per album pair:
 
 Last check: if the edition it would keep has a lower-quality copy of any track than the one it would remove (say a CD-quality deluxe vs a hi-res standard), the whole album gets bumped to Review.
 
+Within a folder, ties on quality go to the copy that fits in: named like the other tracks (`01-03 Title` vs `03 Title`) and written in the same download batch. A later stray re-download gets marked "Doesn't match the folder" and is the one selected.
+
 Quality ranking is lossless over lossy, then bit depth, then sample rate. FLAC bitrate is ignored on purpose, since it only reflects how compressible the audio is.
 
 The full rule set is in [docs/HANDOFF.md](docs/HANDOFF.md#4-scan-pipeline-in-detail).

@@ -142,7 +142,7 @@ Deluxe regex (album tag + folder name): `deluxe|expanded|special edition|super d
 6. **All tracks identical or same recording** → suggested, "Identical audio" or "Same recordings". Keeper ranked by: number of tracks where it holds the best quality, folder track count, mean tag count, earliest year. Detail text notes when release years differ but audio is the same.
 7. Otherwise → manual, "Couldn't confirm same recordings".
 
-**Post-check:** for suggested clusters, each track keeps the best copy *in the keeper folder* (ranked by score, no ` (n)` filename suffix, more tags, older mtime). If any other copy in that track is higher quality than the kept one, the whole cluster is downgraded to manual: "Better quality in the edition we'd remove". This is what protects a hi-res standard edition from a CD-quality deluxe.
+**Post-check:** for suggested clusters, each track keeps the best copy *in the keeper folder* (ranked by score, then fit with the folder, no ` (n)` filename suffix, more tags, older mtime). Fit counts the other audio files in the folder, excluding the copies being compared, that share the copy's track-number prefix shape and extension (`01-03 ` → `99-99 `), plus those written within an hour of it (same download batch). A copy scoring under half the best fit in its folder is flagged `stray` and shown as "Doesn't match the folder". Fit only picks the keeper; it never confirms a duplicate. If any other copy in that track is higher quality than the kept one, the whole cluster is downgraded to manual: "Better quality in the edition we'd remove". This is what protects a hi-res standard edition from a CD-quality deluxe.
 
 Manual clusters never pre-select anything.
 

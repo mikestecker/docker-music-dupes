@@ -83,6 +83,9 @@ DELUXE_RE = re.compile(
     r"collector'?s|anniversary|extended|complete edition)\b", re.I)
 YEAR_RE = re.compile(r"\((\d{4})\)")
 COPY_RE = re.compile(r"\s*\(\d+\)$")
+# Track-number prefix of a filename: "01-03 ", "03 ", "1. ", "03 - "
+PREFIX_RE = re.compile(r"^\d{1,3}(?:[-.]\d{1,3})?(?:\s*[-._]\s*|\s+)?")
+BATCH_SECS = 3600  # files written this close together came from one download
 LEN_TOL = 2.5  # seconds; beyond this two files aren't treated as the same take
 
 
@@ -578,10 +581,47 @@ def row_evidence(g, single):
             "has_isrc": all(isrcs)}
 
 
-def keep_rank(f):
-    """Within one folder: better quality, no ' (1)' suffix, more tags, older."""
+def name_shape(name):
+    """How a file is named, minus the title: "01-03 Graveyard.flac" -> ("99-99 ", ".flac")."""
+    stem, ext = os.path.splitext(name)
+    m = PREFIX_RE.match(stem)
+    return re.sub(r"\d", "9", m.group(0) if m else ""), ext.lower()
+
+
+def folder_files(folder, cache):
+    """[(rel, name shape, mtime)] for the audio files in a folder, cached per scan."""
+    if folder not in cache:
+        out = []
+        try:
+            with os.scandir(os.path.join(MUSIC, folder)) as it:
+                for e in it:
+                    if (e.name.startswith(".") or not e.is_file(follow_symlinks=False)
+                            or os.path.splitext(e.name)[1].lower() not in AUDIO_EXT):
+                        continue
+                    out.append((os.path.join(folder, e.name), name_shape(e.name),
+                                e.stat(follow_symlinks=False).st_mtime))
+        except OSError:
+            pass
+        cache[folder] = out
+    return cache[folder]
+
+
+def folder_fit(f, group, cache):
+    """How well a copy fits the rest of its folder: siblings named the same way
+    plus siblings written in the same download batch. The copies being compared
+    don't count, so a stray re-download scores low against the album's files."""
+    skip = {x["rel"] for x in group}
+    shape = name_shape(os.path.basename(f["rel"]))
+    sibs = [s for s in folder_files(f["folder"], cache) if s[0] not in skip]
+    return (sum(s[1] == shape for s in sibs)
+            + sum(abs(s[2] - f["mtime"]) <= BATCH_SECS for s in sibs))
+
+
+def keep_rank(f, fit=0):
+    """Within one folder: better quality, fits the folder (same naming and
+    download batch as its siblings), no ' (1)' suffix, more tags, older."""
     stem = os.path.splitext(os.path.basename(f["rel"]))[0]
-    return (score(f), not COPY_RE.search(stem), len(f["tags"]), -f["mtime"])
+    return (score(f), fit, not COPY_RE.search(stem), len(f["tags"]), -f["mtime"])
 
 
 def file_props(f):
@@ -603,7 +643,7 @@ def file_props(f):
     }
 
 
-def build_cluster(folders, rows, ignored, folder_counts):
+def build_cluster(folders, rows, ignored, folder_cache):
     rows.sort(key=lambda g: (min(f["disc"] for f in g),
                              min(f["track"] or 999 for f in g), norm(g[0]["title"])))
     single = len(folders) == 1
@@ -611,13 +651,6 @@ def build_cluster(folders, rows, ignored, folder_counts):
     for folder in folders:
         fs = [f for g in rows for f in g if f["folder"] == folder]
         first, best = fs[0], max(fs, key=score)
-        if folder not in folder_counts:
-            try:
-                folder_counts[folder] = sum(
-                    1 for n in os.listdir(os.path.join(MUSIC, folder))
-                    if not n.startswith(".") and os.path.splitext(n)[1].lower() in AUDIO_EXT)
-            except OSError:
-                folder_counts[folder] = 0
         fmt, detail = label(best)
         eds.append({
             "folder": folder,
@@ -625,7 +658,7 @@ def build_cluster(folders, rows, ignored, folder_counts):
             "album": first["album"] or os.path.basename(folder),
             "year": year_of(first),
             "deluxe": bool(DELUXE_RE.search(f"{first['album']} {os.path.basename(folder)}")),
-            "tracks": folder_counts[folder],
+            "tracks": len(folder_files(folder, folder_cache)),
             "format": fmt, "detail": detail, "tier": tier(best),
             "source": Counter(f["source"] for f in fs).most_common(1)[0][0],
             "added": max(f["mtime"] for f in fs),
@@ -635,13 +668,15 @@ def build_cluster(folders, rows, ignored, folder_counts):
     evs = [row_evidence(g, single) for g in rows]
     kind, reason, detail, keeper = classify(eds, rows, evs, single)
 
+    fits = {f["rel"]: folder_fit(f, g, folder_cache) for g in rows for f in g}
+
     # Pre-select per row: keep the best copy in the keeper folder; everything
     # else in the row goes only if it isn't better than what we keep.
     picks = []
     if keeper is not None:
         for g in rows:
             mine = [f for f in g if f["folder"] == keeper]
-            keep = max(mine, key=keep_rank)
+            keep = max(mine, key=lambda f: keep_rank(f, fits[f["rel"]]))
             others = [f for f in g if f is not keep]
             if any(score(f) > score(keep) for f in others):
                 kind, keeper, picks = "manual", None, []
@@ -658,6 +693,11 @@ def build_cluster(folders, rows, ignored, folder_counts):
     out_rows = []
     for g, ev in zip(rows, evs):
         best = max(score(f) for f in g)
+        # A copy that fits its folder far worse than another copy in the same
+        # folder (other naming, another day) is a stray re-download.
+        top_fit = Counter()
+        for f in g:
+            top_fit[f["folder"]] = max(top_fit[f["folder"]], fits[f["rel"]])
         files = []
         for f in sorted(g, key=lambda f: (folders.index(f["folder"]), -score(f)[1])):
             fmt, det = label(f)
@@ -668,6 +708,7 @@ def build_cluster(folders, rows, ignored, folder_counts):
                 "secs": f["secs"], "size": f["size"], "mtime": f["mtime"],
                 "source": f["source"], "source_why": f["source_why"],
                 "quality": "best" if score(f) == best else "lower",
+                "stray": fits[f["rel"]] * 2 < top_fit[f["folder"]],
                 "suggested": f["rel"] in picks, "moved": False,
                 "props": file_props(f), "tags": f["tags"],
             })
@@ -707,7 +748,8 @@ def classify(eds, rows, evs, single):
         if all(e["confirmed"] for e in evs):
             return ("suggested", "Duplicate files in one folder",
                     "Same track slot in the same album folder with matching length. "
-                    "The best copy stays.", eds[0]["folder"])
+                    "The best copy stays; on equal quality, the one named and dated like "
+                    "the rest of the folder.", eds[0]["folder"])
         return ("manual", "Couldn't confirm duplicates",
                 "Same folder, but the lengths or recordings don't line up.", None)
 
