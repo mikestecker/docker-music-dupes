@@ -90,6 +90,26 @@ def build(root):
            "Countryman", "Countryman", "Hits", "2025", t, mtime=sep22 + i, disc=str(d))
     mk(1550, ["-c:a", "flac", "-ar", "48000"], 5.5, "Countryman/Hits (2025)/20 You Make It Easy.flac",
        "You Make It Easy", "Countryman", "Countryman", "Hits", "2025", 5, mtime=oct3b, disc="2")
+    # Tidarr grabbed three tracks at 24-bit into its own artist folder (Tidal's
+    # middle-dot spelling, ffmpeg container tags, a featuring credit in a title)
+    # while Lidarr has the complete album at 16-bit under MusicBrainz's bullet.
+    HR441 = ["-c:a", "flac", "-sample_fmt", "s32", "-ar", "44100"]
+    tidarr = {"compatible_brands": "mp41dashcmfc", "major_brand": "iso8"}
+    for freq, t, title in [(1600, 2, "Runaway"), (1601, 10, "Rest (with Samm Henshaw)"),
+                           (1602, 12, "Creature")]:
+        mk(freq, HR441, 5, f"Half\u00b7Alive/Now (2019)/{t:02d} {title}.flac", title,
+           "Half\u00b7Alive", "Half\u00b7Alive", "Now", "2019", t, mtime=oct3b + t, **tidarr)
+    for freq, t, title in [(1610, 1, "Ok"), (1600, 2, "Runaway"), (1611, 3, "Maybe"),
+                           (1601, 10, "Rest"), (1602, 12, "Creature")]:
+        mk(freq, FL, 5, f"Half\u2022Alive/Now (2019)/{t:02d} {title}.flac", title,
+           "Half\u2022Alive", "Half\u2022Alive", "Now", "2019", t, mtime=sep22 + t)
+    # A partial lossy copy of an album that's complete in FLAC: suggested outright.
+    for freq, t, title in [(1700, 1, "One"), (1701, 2, "Two"), (1702, 3, "Three"), (1703, 4, "Four")]:
+        mk(freq, FL, 5, f"Partly/Album (2018)/{t:02d} {title}.flac", title,
+           "Partly", "Partly", "Album", "2018", t)
+    for freq, t, title in [(1701, 2, "Two"), (1702, 3, "Three")]:
+        mk(freq, AAC, 5, f"Partly/Album (2018) (1)/{t:02d} {title}.m4a", title,
+           "Partly", "Partly", "Album", "2018", t)
 
 
 if __name__ == "__main__":

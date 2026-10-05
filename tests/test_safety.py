@@ -260,3 +260,119 @@ def test_quarantine_dir_cant_cover_library(tmp_path, qdir):
 def test_quarantine_dir_inside_library_is_fine(app_mod):
     app_mod.check_dirs("/music", "/music/.dupe-quarantine")
     app_mod.check_dirs("/music", "/elsewhere")
+
+
+# ---------- upgrade in place (#13) ----------
+
+TIDARR = "Half·Alive/Now (2019)"
+LIDARR = "Half•Alive/Now (2019)"
+
+
+def bits(path):
+    import mutagen
+    return mutagen.File(path).info.bits_per_sample
+
+
+def test_upgrade_in_place_and_undo(client, scan, lib):
+    music = lib[0]
+    scan("loose")
+    better, album = f"{TIDARR}/02 Runaway.flac", f"{LIDARR}/02 Runaway.flac"
+    assert bits(music / better) == 24 and bits(music / album) == 16
+    r = client.post("/api/upgrade", json={"rel": better})
+    assert r.status_code == 200, r.text
+    r = r.json()
+    assert r["replaced"] == album and r["now"] == album
+    assert not (music / better).exists()
+    assert bits(music / album) == 24  # the album now holds the 24-bit file
+    assert bits(music / ".dupe-quarantine" / r["batch"] / album) == 16
+    listed = next(b for b in client.get("/api/quarantine").json() if b["batch"] == r["batch"])
+    assert listed["moves"][0]["from"] == better
+
+    u = client.post("/api/restore", json={"batch": r["batch"]}).json()
+    assert u == {"restored": 1, "errors": []}
+    assert bits(music / better) == 24 and bits(music / album) == 16
+    assert not any(b["batch"] == r["batch"] for b in client.get("/api/quarantine").json())
+
+
+def test_upgrade_refuses_what_it_wasnt_offered(client, scan):
+    scan("loose")
+    album = f"{LIDARR}/02 Runaway.flac"  # the lower-quality copy has no upgrade
+    assert client.post("/api/upgrade", json={"rel": album}).status_code == 400
+    assert client.post("/api/upgrade", json={"rel": "../../etc/passwd"}).status_code == 400
+
+
+def test_upgrade_refuses_changed_files(client, scan, lib):
+    music = lib[0]
+    scan("loose")
+    better, album = music / TIDARR / "12 Creature.flac", music / LIDARR / "12 Creature.flac"
+    st = os.stat(album)
+    os.utime(album, (st.st_atime, st.st_mtime + 5))
+    try:
+        r = client.post("/api/upgrade", json={"rel": f"{TIDARR}/12 Creature.flac"})
+        assert r.status_code == 409
+        assert better.exists() and bits(album) == 16
+    finally:
+        os.utime(album, (st.st_atime, st.st_mtime))
+
+
+# ---------- Lidarr retag history (#13) ----------
+
+@pytest.fixture
+def fake_lidarr(app_mod, monkeypatch):
+    import http.server
+    import urllib.parse
+
+    records = {
+        "3": [{"data": {"ImportedPath": "/data/media/music/A/B/01 X.flac",
+                        "downloadClientName": "Tidarr (SABnzbd)"}}],
+        "9": [{"sourceTitle": "/data/media/music/A/B/02 Y.flac", "date": "2026-10-03T14:02:00Z",
+               "data": {"tagsScrubbed": "True",
+                        "diff": json.dumps([{"Field": "ISRC", "OldValue": "US1", "NewValue": ""},
+                                            {"Field": "Title", "OldValue": "y", "NewValue": "Y"}])}},
+              {"sourceTitle": "/elsewhere/03 Z.flac", "data": {}}],
+    }
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            assert self.headers["X-Api-Key"] == "k"
+            recs = records.get(q["eventType"][0], [])
+            body = json.dumps({"records": recs, "totalRecords": len(recs)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(app_mod, "LIDARR_URL", f"http://127.0.0.1:{srv.server_port}")
+    monkeypatch.setattr(app_mod, "LIDARR_KEY", "k")
+    monkeypatch.setattr(app_mod, "LIDARR_ROOT", "/data/media/music")
+    yield
+    srv.shutdown()
+
+
+def test_lidarr_imports_and_retags(app_mod, fake_lidarr):
+    imports, retags, warn = app_mod.fetch_lidarr_sources()
+    assert warn is None
+    assert imports == {"A/B/01 X.flac": "Tidarr (SABnzbd)"}  # PascalCase key read too
+    assert retags == {"A/B/02 Y.flac": {"date": "2026-10-03T14:02:00Z",
+                                        "fields": ["ISRC", "Title"], "scrubbed": True}}
+    assert app_mod.retag_text(retags["A/B/02 Y.flac"]) == "2026-10-03, changed ISRC, Title, removed other tags"
+
+
+def test_retagged_date_is_ignored(app_mod, lib):
+    # The Mixtape stray, pretending Lidarr rewrote its tags: its date no longer
+    # counts, but its naming still marks it as the odd one out.
+    folder = "Mixtape/Manic (2020)"
+    group = [app_mod.load_file(f"{folder}/01-03 Graveyard.flac"),
+             app_mod.load_file(f"{folder}/03 Graveyard.flac")]
+    stray = group[1]
+    score, tone, text = app_mod.folder_fit(stray, group, {"retagged": {stray["rel"]}})
+    assert tone == "warn" and "added" not in text.lower()
+    assert text.endswith("Its date is ignored because Lidarr rewrote its tags")
+    score_plain, _, text_plain = app_mod.folder_fit(stray, group, {})
+    assert "added" in text_plain.lower() and score < 0.5
