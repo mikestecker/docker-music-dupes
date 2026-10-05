@@ -12,6 +12,7 @@ batch. Quarantine is a rename into a hidden folder inside the library mount.
 """
 import errno
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -31,7 +32,7 @@ from statistics import mean
 
 import mutagen
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from mutagen.id3 import ID3
 from mutagen.mp4 import MP4Tags
 from pydantic import BaseModel
@@ -61,6 +62,13 @@ ND_CLIENT = "music-dupes"
 LIDARR_URL = os.environ.get("LIDARR_URL", "").rstrip("/")
 LIDARR_KEY = os.environ.get("LIDARR_API_KEY", "")
 LIDARR_ROOT = os.path.normpath(os.environ.get("LIDARR_MUSIC_ROOT", "/data/media/music"))
+
+# Hostnames the UI may be reached by, besides IPs, single-label names and
+# private suffixes (see host_allowed). Comma-separated; "*" turns the check off.
+ALLOWED_HOSTS = {h.strip().lower().rstrip(".") for h in
+                 os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()}
+LAN_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
+                ".localdomain", ".localhost")
 
 AUDIO_EXT = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".aac",
              ".wav", ".aiff", ".aif", ".wma"}
@@ -283,19 +291,48 @@ def load_json(path, default):
         return default
 
 
+def load_manifest():
+    """The quarantine manifest. Unlike the other stores it is never silently
+    reset: losing it would orphan every quarantined file."""
+    try:
+        with open(MANIFEST) as fh:
+            m = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise HTTPException(500, f"Can't read {MANIFEST} ({e}). Nothing was changed. "
+                                 "Fix or move that file, then try again.")
+    if not isinstance(m, dict):
+        raise HTTPException(500, f"{MANIFEST} isn't a quarantine manifest. Nothing was changed.")
+    return m
+
+
 def save_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    try:
+        fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def load_file(rel):
-    """Our file dict for a library-relative path, or None if unreadable/gone."""
-    p = os.path.join(MUSIC, rel)
+    """Our file dict for a library-relative path, or None if unreadable/gone.
+    Symlinks, quarantined files and paths outside the library are never copies."""
     try:
+        p = library_path(rel)
+        if not os.path.isfile(p):
+            return None
         st = os.stat(p)
-    except OSError:
+    except (ValueError, OSError):
         return None
     info = CACHE.get(rel, st.st_mtime, st.st_size)
     if info is None:
@@ -449,7 +486,7 @@ def navidrome_groups():
     """Groups of rels Navidrome shows as the same track in the same album."""
     source = navidrome_source()
     songs = nd_songs_api() if source == "api" else nd_songs_db()
-    buckets, seen, found = defaultdict(list), 0, 0
+    buckets, seen, found, rels = defaultdict(list), 0, 0, set()
     for s in songs:
         seen += 1
         p = os.path.normpath(s["path"] or "")
@@ -457,6 +494,9 @@ def navidrome_groups():
         if rel.startswith("..") or not os.path.exists(os.path.join(MUSIC, rel)):
             continue
         found += 1
+        if rel in rels:  # overlapping libraries list one file twice
+            continue
+        rels.add(rel)
         key = (s["album_id"], s["disc"] or 1, s["track"], norm(s["title"]))
         buckets[key].append((rel, s["album_id"]))
     if source == "api" and seen >= 20 and found < seen / 2:
@@ -486,6 +526,13 @@ def year_of(f):
 def row_evidence(g, single):
     md5s = [f["md5"] for f in g]
     identical = all(md5s) and len(set(md5s)) == 1
+    # Integrity, not quality: a FLAC's MD5 and length live in its header, so a
+    # truncated copy still "matches". mutagen's FLAC bitrate is measured from
+    # the audio bytes actually on disk, which barely moves between compression
+    # levels for the same audio, so a big gap means a copy is cut short.
+    rates = [f["kbps"] for f in g]
+    damaged = identical and min(rates) < 0.75 * max(rates)
+    identical = identical and not damaged
     isrcs = [f["isrc"] for f in g]
     same_isrc = all(isrcs) and len(set(isrcs)) == 1
     isrc_conflict = all(isrcs) and len(set(isrcs)) > 1
@@ -495,7 +542,10 @@ def row_evidence(g, single):
     same_fmt = len({score(f) for f in g if f["lossless"]}) == 1 and all(f["lossless"] for f in g)
     chips = []
     add = lambda tone, text, why="": chips.append({"tone": tone, "text": text, "why": why})
-    if identical:
+    if damaged:
+        add("warn", "Possibly damaged", "The audio checksums match, but one copy holds much less audio "
+            "data than the other, so it may be cut short or corrupt. Play each copy to the end.")
+    elif identical:
         add("good", "Identical audio", "The FLAC audio checksums match, so the decoded audio is bit-for-bit the same.")
     elif all(md5s) and same_fmt:
         add("neutral", "Audio differs", "Same format, but the decoded audio isn't bit-identical. Usually a different master, remaster or edit.")
@@ -511,7 +561,7 @@ def row_evidence(g, single):
         add("neutral", f"Length off by {spread:.1f}s", "Small gaps usually mean a different master or different padding.")
     else:
         add("warn", f"Length off by {fmt_len(spread)}", "Probably a different version, edit or recording.")
-    blocked = isrc_conflict or spread > LEN_TOL
+    blocked = isrc_conflict or spread > LEN_TOL or damaged
     if identical:
         confirmed = "identical"
     elif blocked:
@@ -522,7 +572,8 @@ def row_evidence(g, single):
         confirmed = "slot"  # same track slot in the same album folder
     else:
         confirmed = None
-    return {"chips": chips, "identical": identical, "isrc_conflict": isrc_conflict,
+    return {"chips": chips, "identical": identical, "damaged": damaged,
+            "isrc_conflict": isrc_conflict,
             "spread": spread, "blocked": blocked, "confirmed": confirmed,
             "has_isrc": all(isrcs)}
 
@@ -636,6 +687,12 @@ def classify(eds, rows, evs, single):
         return ("manual", "Different album artists",
                 "The same tracks are filed under different artists. Kept separate "
                 "unless you decide otherwise.", None)
+    n_damaged = sum(e["damaged"] for e in evs)
+    if n_damaged:
+        return ("manual", "Possibly damaged copy",
+                f"On {n_damaged} of {len(evs)} tracks one copy holds much less audio data "
+                "than another with the same checksum, so it may be cut short. Play each "
+                "copy to the end before removing anything.", None)
     n_conflict = sum(e["isrc_conflict"] for e in evs)
     if n_conflict:
         return ("manual", "Different recordings",
@@ -704,8 +761,10 @@ def walk_audio():
         dirs[:] = [x for x in dirs
                    if not x.startswith(".") and os.path.join(d, x) != QDIR]
         for n in files:
-            if not n.startswith(".") and os.path.splitext(n)[1].lower() in AUDIO_EXT:
-                yield os.path.join(d, n)
+            p = os.path.join(d, n)
+            if (not n.startswith(".") and os.path.splitext(n)[1].lower() in AUDIO_EXT
+                    and not os.path.islink(p)):
+                yield p
 
 
 def run_scan(mode):
@@ -785,14 +844,28 @@ def inside(path, root):
     return os.path.commonpath([path, root]) == root
 
 
+def check_dirs(music, qdir):
+    """Refuse a quarantine folder that is the library or contains it: we'd write
+    an .ndignore of "*" over the whole library and Navidrome would hide it."""
+    if inside(music, qdir):
+        raise SystemExit(f"QUARANTINE_DIR ({qdir}) can't be the music folder ({music}) "
+                         "or contain it. Leave it unset to use MUSIC_DIR/.dupe-quarantine.")
+
+
 def library_path(rel):
-    p = os.path.realpath(os.path.join(MUSIC, rel))
-    if not inside(p, MUSIC) or inside(p, QDIR):
+    """Absolute path for a library-relative one. Refuses paths outside the
+    library, inside quarantine, or reached through a symlink: realpath() would
+    turn "move the link" into "move the file it points to"."""
+    p = os.path.normpath(os.path.join(MUSIC, rel))
+    if (os.path.realpath(p) != p or p == MUSIC or not inside(p, MUSIC)
+            or inside(p, QDIR)):
         raise ValueError("path is outside the library")
     return p
 
 
 def move(src, dst):
+    if os.path.lexists(dst):  # os.rename would silently replace it
+        raise FileExistsError(errno.EEXIST, "a file already exists there", dst)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
         os.rename(src, dst)
@@ -815,6 +888,7 @@ MLOCK = threading.Lock()
 
 # ---------- app ----------
 
+check_dirs(MUSIC, QDIR)
 os.makedirs(CONFIG, exist_ok=True)
 os.makedirs(QDIR, exist_ok=True)
 _ndignore = os.path.join(QDIR, ".ndignore")
@@ -832,6 +906,48 @@ if not os.path.exists(SOURCES):
 CACHE = TagCache(os.path.join(CONFIG, "tags.db"))
 
 app = FastAPI(title="music-dupes")
+
+
+def host_allowed(host):
+    """DNS rebinding needs a public domain name pointed at your LAN, so by
+    default only IPs, single-label names and private suffixes get in. Anything
+    else (a reverse proxy's hostname) has to be listed in ALLOWED_HOSTS."""
+    if "*" in ALLOWED_HOSTS:
+        return True
+    host = (host or "").strip().lower()
+    if host.startswith("["):  # [::1]:8095
+        name = host[1:host.find("]")] if "]" in host else ""
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    name = name.rstrip(".")
+    if not name:
+        return False
+    if name in ALLOWED_HOSTS:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    return name == "localhost" or "." not in name or name.endswith(LAN_SUFFIXES)
+
+
+@app.middleware("http")
+async def request_guard(request, call_next):
+    """No auth, so make sure only this app's own page can drive the API."""
+    host = request.headers.get("host", "")
+    if not host_allowed(host):
+        return PlainTextResponse(
+            f"music-dupes doesn't answer to the hostname {host!r}. If that's your "
+            "reverse proxy, add it to the ALLOWED_HOSTS environment variable.", 403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        # application/json forces a CORS preflight, which we never approve, so
+        # other sites can't send these. FastAPI would happily parse a body
+        # with no Content-Type at all, which browsers send without asking.
+        ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ctype != "application/json" or request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse({"detail": "Requests must come from the music-dupes page."}, 403)
+    return await call_next(request)
 
 
 class ScanReq(BaseModel):
@@ -916,44 +1032,84 @@ def keep_both(req: KeepBothReq):
     return {"ok": True}
 
 
+def unchanged(f):
+    """True if the file is still exactly what the scan saw."""
+    try:
+        st = os.stat(library_path(f["rel"]))
+    except (ValueError, OSError):
+        return False
+    return st.st_size == f["size"] and st.st_mtime == f["mtime"]
+
+
+def new_batch_id(m):
+    while True:
+        bid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+        if bid not in m and not os.path.lexists(os.path.join(QDIR, bid)):
+            return bid
+
+
 @app.post("/api/quarantine")
 def quarantine(req: PathsReq):
-    with LOCK:
-        if STATE["status"] != "done":
-            raise HTTPException(409, "Run a scan first.")
-        rows = [r for c in STATE["clusters"] for r in c["rows"]]
-    wanted = set(req.paths)
-    batch = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-    moved, errors = [], []
-    for r in rows:
-        live = [f for f in r["files"] if not f["moved"]]
-        picks = [f for f in live if f["rel"] in wanted]
-        if not picks:
-            continue
-        if len(picks) >= len(live):  # server-side guard, never trust the client
-            errors.append(f"Skipped {r['title']}: every copy was selected, so nothing would be left.")
-            continue
-        for f in picks:
+    # MLOCK for the whole operation: two overlapping requests must not both
+    # pass the one-copy guard for the same track.
+    with MLOCK:
+        with LOCK:
+            if STATE["status"] != "done":
+                raise HTTPException(409, "Run a scan first.")
+            rows = [r for c in STATE["clusters"] for r in c["rows"]]
+        wanted = set(req.paths)
+        plan, errors = [], []
+        for r in rows:
+            live = [f for f in r["files"] if not f["moved"]]
+            picks = [f for f in live if f["rel"] in wanted]
+            if not picks:
+                continue
+            # The library may have changed since the scan (Lidarr upgrades,
+            # manual cleanup, another tab), so re-check against the disk.
+            keep = [f for f in live if f not in picks and unchanged(f)]
+            if not keep:
+                errors.append(f"Skipped {r['title']}: no other copy would be left, "
+                              "or it changed since the scan. Scan again.")
+                continue
+            for f in picks:
+                if unchanged(f):
+                    plan.append(f)
+                else:
+                    errors.append(f"Skipped {f['rel']}: it changed or moved since the scan. "
+                                  "Scan again.")
+        if not plan:
+            return {"batch": None, "moved": 0, "bytes": 0, "errors": errors}
+
+        # Record the batch before moving anything, so a full or read-only
+        # /config fails here instead of leaving files nobody can restore.
+        m = load_manifest()
+        batch = new_batch_id(m)
+        entry = lambda fs: [{"rel": f["rel"], "size": f["size"],
+                             "quality": f"{f['format']} {f['detail']}"} for f in fs]
+        m[batch] = {"created": time.time(), "files": entry(plan)}
+        save_json(MANIFEST, m)
+
+        moved = []
+        for f in plan:
             try:
                 move(library_path(f["rel"]), os.path.join(QDIR, batch, f["rel"]))
                 f["moved"] = True
-                moved.append({"rel": f["rel"], "size": f["size"],
-                              "quality": f"{f['format']} {f['detail']}"})
+                moved.append(f)
             except Exception as e:
                 errors.append(f"{f['rel']}: {e}")
-    if moved:
-        with MLOCK:
-            m = load_json(MANIFEST, {})
-            m[batch] = {"created": time.time(), "files": moved}
-            save_json(MANIFEST, m)
-    return {"batch": batch, "moved": len(moved),
+        if moved:
+            m[batch]["files"] = entry(moved)
+        else:
+            del m[batch]
+        save_json(MANIFEST, m)
+    return {"batch": batch if moved else None, "moved": len(moved),
             "bytes": sum(f["size"] for f in moved), "errors": errors}
 
 
 @app.get("/api/quarantine")
 def list_quarantine():
     with MLOCK:
-        m = load_json(MANIFEST, {})
+        m = load_manifest()
     out = []
     for bid in sorted(m, reverse=True):
         files = [f for f in m[bid]["files"]
@@ -973,19 +1129,23 @@ def get_batch(m, bid):
 @app.post("/api/restore")
 def restore(req: BatchReq):
     with MLOCK:
-        m = load_json(MANIFEST, {})
+        m = load_manifest()
         b = get_batch(m, req.batch)
         restored, remaining, errors, back = 0, [], [], set()
         for f in b["files"]:
             src = os.path.join(QDIR, req.batch, f["rel"])
-            if not os.path.exists(src):
+            if not os.path.lexists(src):
                 continue
-            dst = library_path(f["rel"])
-            if os.path.exists(dst):
+            try:
+                move(src, library_path(f["rel"]))
+            except FileExistsError:
                 errors.append(f"{f['rel']}: a file already exists there, left in quarantine.")
                 remaining.append(f)
                 continue
-            move(src, dst)
+            except Exception as e:  # keep going; one bad file mustn't strand the rest
+                errors.append(f"{f['rel']}: {e}, left in quarantine.")
+                remaining.append(f)
+                continue
             back.add(f["rel"])
             restored += 1
         bdir = os.path.join(QDIR, req.batch)
@@ -1008,11 +1168,23 @@ def restore(req: BatchReq):
 @app.post("/api/purge")
 def purge(req: BatchReq):
     with MLOCK:
-        m = load_json(MANIFEST, {})
+        m = load_manifest()
         b = get_batch(m, req.batch)
-        freed = sum(f["size"] for f in b["files"]
-                    if os.path.exists(os.path.join(QDIR, req.batch, f["rel"])))
-        shutil.rmtree(os.path.join(QDIR, req.batch), ignore_errors=True)
+        bdir = os.path.join(QDIR, req.batch)
+        here = lambda f: os.path.lexists(os.path.join(bdir, f["rel"]))
+        freed = sum(f["size"] for f in b["files"] if here(f))
+        try:
+            if os.path.lexists(bdir):
+                shutil.rmtree(bdir)
+        except OSError as e:
+            left = [f for f in b["files"] if here(f)]
+            if left:
+                b["files"] = left
+            else:
+                del m[req.batch]
+            save_json(MANIFEST, m)
+            raise HTTPException(500, f"Couldn't delete everything in that batch ({e}). "
+                                     f"{len(left)} files are still in quarantine.")
         del m[req.batch]
         save_json(MANIFEST, m)
     return {"bytes": freed}

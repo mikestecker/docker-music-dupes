@@ -170,7 +170,10 @@ Manual clusters never pre-select anything.
 5. **Manual (Review) clusters never pre-select.** Clusters the user marked "Keep both" never pre-select.
 6. Restore never overwrites: if the original path is occupied, the file stays in quarantine and an error is reported.
 7. Navidrome's live DB is never opened directly; only a copy.
-8. No auth exists. The app must stay LAN-only; if proxied through Nginx Proxy Manager, put an Access List in front of it.
+8. No auth exists. The app must stay LAN-only; if proxied through Nginx Proxy Manager, put an Access List in front of it. The request guard (Host allowlist, JSON-only POSTs, no cross-site requests) keeps other websites from driving the API through the browser.
+9. Symlinks are never copies and nothing is moved through one (`library_path()` requires realpath == path).
+10. Quarantine is serialized under `MLOCK` and re-checks the disk: every moved file must match the scan, and an unchanged copy must survive.
+11. `quarantine.json` is never reset when unreadable; quarantine/restore/purge refuse to run instead.
 
 ---
 
@@ -290,6 +293,7 @@ System UI font, tabular numerals. The quality chip (outlined, coloured by tier, 
 | `NAVIDROME_DB` | `/navidrome/navidrome.db` | DB fallback if API vars unset |
 | `LIDARR_URL` / `LIDARR_API_KEY` | unset | Enables Lidarr source lookup |
 | `LIDARR_MUSIC_ROOT` | `/data/media/music` | Library path as Lidarr sees it |
+| `ALLOWED_HOSTS` | unset | Extra hostnames accepted by the request guard (`*` disables it) |
 
 ---
 

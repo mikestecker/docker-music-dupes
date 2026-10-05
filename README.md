@@ -193,9 +193,10 @@ Everything is set with environment variables. Only the mounts are required.
 | Variable | Default | What it does |
 |---|---|---|
 | `TZ` | `UTC` | Timezone for timestamps and quarantine batch names |
+| `ALLOWED_HOSTS` | | Extra hostnames the UI answers to, comma-separated, e.g. `dupes.example.com`. IPs, single-word names (`truenas`) and `.local`/`.lan`/`.home.arpa`/`.internal` names always work. `*` turns the check off. See [Reverse proxy](#reverse-proxy). |
 | `PORT` | `8095` | Port the app listens on **inside** the container. You usually change the host side of the port mapping instead. |
 | `MUSIC_DIR` | `/music` | Library path inside the container |
-| `QUARANTINE_DIR` | `$MUSIC_DIR/.dupe-quarantine` | Where quarantined files go. Keep it inside the music mount. |
+| `QUARANTINE_DIR` | `$MUSIC_DIR/.dupe-quarantine` | Where quarantined files go. Keep it inside the music mount. The app refuses to start if it's the library itself or a parent of it. |
 | `CONFIG_DIR` | `/config` | Where state is stored |
 | `NAVIDROME_URL` | | Navidrome base URL, e.g. `http://192.168.1.10:4533`. Enables Navidrome mode. |
 | `NAVIDROME_USER` | | Navidrome username (a non-admin user is fine) |
@@ -315,10 +316,16 @@ The full rule set is in [docs/HANDOFF.md](docs/HANDOFF.md#4-scan-pipeline-in-det
 - Restore never overwrites a file that's come back in the meantime.
 - Navidrome's live database is never opened directly.
 - The quarantine folder starts with a dot and contains an `.ndignore`, so Navidrome and most scanners skip it.
+- Quarantine re-checks the disk first: if the copy being kept is gone or changed, or the file being moved isn't the one that was scanned, that track is skipped until you scan again.
+- Symlinks are never treated as copies, and nothing is ever moved through a symlink.
+- FLAC copies with the same audio checksum but much less audio data (a cut-short download) go to Review instead of counting as identical.
+- Other websites can't drive the API through your browser: requests must be JSON from the app's own page, and unknown hostnames are refused (see `ALLOWED_HOSTS`).
 
 ---
 
 ## Reverse proxy
+
+If you reach the app by a real domain name, add it to `ALLOWED_HOSTS` (for example `ALLOWED_HOSTS=dupes.example.com`), or you'll get a "doesn't answer to the hostname" page. That check is what stops a malicious website from using DNS rebinding to reach the app through your browser. IPs, single-word names and `.local`/`.lan`/`.home.arpa` names work without it.
 
 There's no login, so if you expose this past your LAN, put authentication in front of it. Some examples:
 
@@ -351,6 +358,10 @@ On TrueNAS, edit the app and save it, or use the update button once a new image 
 **Navidrome mode says paths don't exist.** Turn on **Report Real Path** for the `music-dupes` player in Navidrome (see [Navidrome](#navidrome)), and check `NAVIDROME_MUSIC_ROOT` matches where Navidrome mounts the library.
 
 **Lidarr sources show "Not from Lidarr" for everything.** `LIDARR_MUSIC_ROOT` doesn't match the path Lidarr uses. Check a file's path in Lidarr's history.
+
+**"music-dupes doesn't answer to the hostname ..."** You're using a domain name the app doesn't know. Add it to `ALLOWED_HOSTS`.
+
+**The container exits saying QUARANTINE_DIR can't be the music folder.** Unset `QUARANTINE_DIR` (the default is fine), or point it somewhere that isn't the library or a parent of it.
 
 **Scan results disappeared.** They live in memory, so a container restart clears them. Just scan again; the tag cache makes repeat scans fast.
 

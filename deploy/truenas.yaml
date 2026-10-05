@@ -12,6 +12,8 @@ services:
     user: "3000:3000"
     environment:
       - TZ=America/Los_Angeles
+      # Only needed for a reverse-proxy domain name, e.g. dupes.example.com.
+      # - ALLOWED_HOSTS=dupes.example.com
       # Optional Navidrome mode. Separate compose projects can't resolve each
       # other by container name, so use the NAS IP.
       - NAVIDROME_URL=http://10.0.9.101:4533

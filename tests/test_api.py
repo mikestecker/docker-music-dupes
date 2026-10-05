@@ -1,6 +1,8 @@
 """HTTP API behaviour and the safety invariants in docs/HANDOFF.md section 5."""
 import os
 
+import pytest
+
 
 def test_health_and_info(client, lib):
     assert client.get("/healthz").json() == {"ok": True}
@@ -110,3 +112,45 @@ def test_keep_both_persists(client, scan, lib):
     client.post("/api/keep-both", json={"key": key, "kept": False})
     c = next(c for c in scan()["clusters"] if c["key"] == key)
     assert c["ignored"] is False
+
+
+# ---------- cross-site requests and DNS rebinding (#4) ----------
+
+
+@pytest.mark.parametrize("host,ok", [
+    ("10.0.9.101:8095", True), ("192.168.1.5", True), ("[::1]:8095", True),
+    ("localhost:8095", True), ("truenas:8095", True), ("nas.local", True),
+    ("music.home.arpa", True), ("box.lan:8095", True),
+    ("rebind.attacker.example", False), ("music.example.com:443", False), ("", False),
+])
+def test_host_allowlist(app_mod, host, ok):
+    assert app_mod.host_allowed(host) is ok
+
+
+def test_foreign_host_rejected(client):
+    assert client.get("/api/info", headers={"Host": "rebind.attacker.example"}).status_code == 403
+
+
+def test_allowed_hosts_setting(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "ALLOWED_HOSTS", {"dupes.example.com"})
+    assert app_mod.host_allowed("dupes.example.com:443")
+    assert not app_mod.host_allowed("other.example.com")
+    monkeypatch.setattr(app_mod, "ALLOWED_HOSTS", {"*"})
+    assert app_mod.host_allowed("anything.example.com")
+
+
+@pytest.mark.parametrize("ctype", [None, "text/plain", "application/x-www-form-urlencoded",
+                                   "multipart/form-data; boundary=x"])
+def test_post_needs_json_content_type(client, ctype):
+    headers = {"Content-Type": ctype} if ctype else {}
+    r = client.post("/api/keep-both", content=b'{"key": "x", "kept": true}', headers=headers)
+    assert r.status_code == 403
+
+
+def test_cross_site_post_rejected(client):
+    r = client.post("/api/keep-both", json={"key": "x", "kept": False},
+                    headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+    r = client.post("/api/keep-both", json={"key": "x", "kept": False},
+                    headers={"Sec-Fetch-Site": "same-origin"})
+    assert r.status_code == 200

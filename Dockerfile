@@ -35,4 +35,4 @@ VOLUME ["/config"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD python -c "import os,urllib.request;urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8095\")}/healthz',timeout=4)" || exit 1
 
-CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port \"${PORT}\" --proxy-headers --forwarded-allow-ips='*'"]
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port \"${PORT}\""]
