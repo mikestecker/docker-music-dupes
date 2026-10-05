@@ -11,19 +11,15 @@ Nothing is deleted except by an explicit "Delete permanently" on a quarantine
 batch. Quarantine is a rename into a hidden folder inside the library mount.
 """
 import errno
-import hashlib
 import ipaddress
 import json
 import os
 import re
-import secrets
 import shutil
 import sqlite3
-import tempfile
 import threading
 import time
 import unicodedata
-import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -48,14 +44,13 @@ MANIFEST = os.path.join(CONFIG, "quarantine.json")
 IGNORED = os.path.join(CONFIG, "kept-both.json")
 SOURCES = os.path.join(CONFIG, "sources.json")
 
-# Navidrome: API preferred, DB snapshot as fallback. ND_ROOT is the music path
-# as Navidrome's container sees it.
-ND_DB = os.environ.get("NAVIDROME_DB", "/navidrome/navidrome.db")
-ND_ROOT = os.path.normpath(os.environ.get("NAVIDROME_MUSIC_ROOT", "/music"))
-ND_URL = os.environ.get("NAVIDROME_URL", "").rstrip("/")
-ND_USER = os.environ.get("NAVIDROME_USER", "")
-ND_PASS = os.environ.get("NAVIDROME_PASSWORD", "")
-ND_CLIENT = "music-dupes"
+# Navidrome used to be a scan mode. It reads the same files, so it found
+# nothing a direct scan doesn't; its settings are now ignored (with a warning).
+ND_LEFTOVERS = [k for k in ("NAVIDROME_URL", "NAVIDROME_USER", "NAVIDROME_PASSWORD",
+                            "NAVIDROME_DB", "NAVIDROME_MUSIC_ROOT") if os.environ.get(k)]
+ND_WARNING = (f"{', '.join(ND_LEFTOVERS)} {'is' if len(ND_LEFTOVERS) == 1 else 'are'} no "
+              "longer used and can be removed: every scan now reads the library "
+              "directly and finds everything Navidrome mode did.") if ND_LEFTOVERS else ""
 
 # Lidarr (optional): its import history says which download client each file
 # came from. LIDARR_ROOT is the music path as Lidarr's container sees it.
@@ -76,7 +71,6 @@ LOSSLESS_EXT = {"flac", "wav", "aiff", "aif"}
 MIME = {"flac": "audio/flac", "m4a": "audio/mp4", "mp3": "audio/mpeg",
         "ogg": "audio/ogg", "opus": "audio/ogg", "aac": "audio/aac",
         "wav": "audio/wav", "aiff": "audio/aiff", "aif": "audio/aiff"}
-MODES = {"same-folder", "cross-folder", "loose", "navidrome"}
 BATCH_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")
 DELUXE_RE = re.compile(
     r"\b(deluxe|expanded|special edition|super deluxe|bonus tracks?|"
@@ -262,21 +256,57 @@ def tier(f):
     return "hires" if f["bits"] > 16 or f["rate"] > 48000 else "lossless"
 
 
-def group_key(f, mode):
+def artist_key(artist):
+    return norm(FEAT_RE.sub("", artist or ""))
+
+
+def stem_key(rel):
+    """A filename as a title: "03 - Song (1).flac" -> "song"."""
+    stem = os.path.splitext(os.path.basename(rel))[0]
+    stem = PREFIX_RE.sub("", COPY_RE.sub("", stem), count=1)
+    return norm(stem)
+
+
+def group_keys(f):
+    """Every way two files can be the same track; sharing any one key puts
+    them in the same group. Grouping casts a wide net on purpose: the evidence
+    step decides what's confirmed, and anything loose lands in Review.
+
+      artist + title             the same song anywhere in the library
+      album artist + album slot  catches differing track credits
+                                 ("A, B" vs "A") on the same album
+      folder + title/filename    stray copies in one folder, untagged too"""
     title = title_key(f["title"])
-    if mode == "navidrome":
-        return (f["nd_album"], f["disc"], f["track"], title)
-    if mode == "same-folder":
-        if not title:
-            stem = os.path.splitext(os.path.basename(f["rel"]))[0]
-            title = norm(COPY_RE.sub("", stem))
-        return (f["folder"], f["disc"], f["track"], title)
-    if not title:
-        return None
-    if mode == "loose":
-        return (norm(f["artist"]), title)
-    return (norm(f["albumartist"] or f["artist"]), norm(f["album"]),
-            f["disc"], f["track"], title)
+    keys = [("folder", f["folder"], title or stem_key(f["rel"]))]
+    if title:
+        keys.append(("artist", artist_key(f["artist"] or f["albumartist"]), title))
+        if f["album"] and f["track"]:
+            keys.append(("album", artist_key(f["albumartist"] or f["artist"]), norm(f["album"]),
+                         f["disc"], f["track"], title))
+    return keys
+
+
+def group_files(files):
+    """Union-find over group_keys: a file matched by one key to B and by
+    another to C ends up in one group with both."""
+    parent = list(range(len(files)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    first = {}
+    for i, f in enumerate(files):
+        for k in group_keys(f):
+            if k in first:
+                parent[find(i)] = find(first[k])
+            else:
+                first[k] = i
+    out = defaultdict(list)
+    for i, f in enumerate(files):
+        out[find(i)].append(f)
+    return [g for g in out.values() if len(g) > 1]
 
 
 # ---------- caches and small JSON stores ----------
@@ -469,104 +499,6 @@ def detect_source(f, lidarr, rules):
 
 
 # ---------- Navidrome sources (used only for grouping) ----------
-
-def navidrome_source():
-    if ND_URL and ND_USER and ND_PASS:
-        return "api"
-    if os.path.isfile(ND_DB):
-        return "db"
-    return None
-
-
-def nd_api(endpoint, **params):
-    salt = secrets.token_hex(8)
-    q = {"u": ND_USER, "s": salt, "v": "1.16.1", "c": ND_CLIENT, "f": "json",
-         "t": hashlib.md5((ND_PASS + salt).encode()).hexdigest(), **params}
-    url = f"{ND_URL}/rest/{endpoint}?{urllib.parse.urlencode(q)}"
-    try:
-        with urllib.request.urlopen(url, timeout=120) as r:
-            resp = json.load(r)["subsonic-response"]
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"can't reach Navidrome at {ND_URL} ({e.reason})")
-    if resp.get("status") != "ok":
-        raise RuntimeError(resp.get("error", {}).get("message", "request failed"))
-    return resp
-
-
-def nd_songs_api():
-    update(total=nd_api("getScanStatus").get("scanStatus", {}).get("count", 0))
-    page, offset = 500, 0
-    while True:
-        songs = nd_api("search3", query="", artistCount=0, albumCount=0,
-                       songCount=page, songOffset=offset
-                       ).get("searchResult3", {}).get("song", [])
-        for s in songs:
-            yield {"path": s.get("path"), "album_id": s.get("albumId"),
-                   "title": s.get("title"), "track": s.get("track"),
-                   "disc": s.get("discNumber")}
-        offset += len(songs)
-        update(scanned=offset)
-        if len(songs) < page:
-            break
-
-
-def nd_songs_db():
-    tmp = tempfile.mkdtemp()
-    try:
-        for suffix in ("", "-wal", "-shm"):
-            if os.path.exists(ND_DB + suffix):
-                shutil.copy2(ND_DB + suffix, os.path.join(tmp, "nd.db" + suffix))
-        db = sqlite3.connect(os.path.join(tmp, "nd.db"))
-        db.row_factory = sqlite3.Row
-        cols = {r["name"] for r in db.execute("PRAGMA table_info(media_file)")}
-        if not cols:
-            raise RuntimeError("Navidrome's database has no media_file table.")
-        lib = "library_id" if "library_id" in cols else "0 AS library_id"
-        sql = (f"SELECT path, album_id, title, track_number, disc_number, {lib} "
-               "FROM media_file")
-        if "missing" in cols:
-            sql += " WHERE missing = 0"
-        libs = {}
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='library'").fetchone():
-            libs = {r["id"]: r["path"] for r in db.execute("SELECT id, path FROM library")}
-        rows = db.execute(sql).fetchall()
-        db.close()
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    update(total=len(rows))
-    for r in rows:
-        p = r["path"]
-        if not os.path.isabs(p):
-            p = os.path.join(libs.get(r["library_id"], ND_ROOT), p)
-        yield {"path": p, "album_id": r["album_id"], "title": r["title"],
-               "track": r["track_number"], "disc": r["disc_number"]}
-
-
-def navidrome_groups():
-    """Groups of rels Navidrome shows as the same track in the same album."""
-    source = navidrome_source()
-    songs = nd_songs_api() if source == "api" else nd_songs_db()
-    buckets, seen, found, rels = defaultdict(list), 0, 0, set()
-    for s in songs:
-        seen += 1
-        p = os.path.normpath(s["path"] or "")
-        rel = os.path.relpath(p, ND_ROOT) if os.path.isabs(p) else p
-        if rel.startswith("..") or not os.path.exists(os.path.join(MUSIC, rel)):
-            continue
-        found += 1
-        if rel in rels:  # overlapping libraries list one file twice
-            continue
-        rels.add(rel)
-        key = (s["album_id"], s["disc"] or 1, s["track"], title_key(s["title"]))
-        buckets[key].append((rel, s["album_id"]))
-    if source == "api" and seen >= 20 and found < seen / 2:
-        raise RuntimeError(
-            f"only {found} of {seen} paths Navidrome reported exist under "
-            f"{MUSIC}. In Navidrome, open Settings > Players, find "
-            f"'{ND_CLIENT}', turn on Report Real Path, then scan again. "
-            "If that's already on, check NAVIDROME_MUSIC_ROOT.")
-    return [g for g in buckets.values() if len(g) > 1]
-
 
 # ---------- analysis ----------
 
@@ -1039,7 +971,7 @@ def classify(eds, rows, evs, single):
 
 # ---------- scan ----------
 
-STATE = {"status": "idle", "scan_id": None, "mode": None, "phase": "",
+STATE = {"status": "idle", "scan_id": None, "phase": "",
          "scanned": 0, "total": 0, "unreadable": 0, "started": None,
          "finished": None, "error": None, "warnings": [], "clusters": []}
 LOCK = threading.Lock()
@@ -1061,57 +993,29 @@ def walk_audio():
                 yield p
 
 
-def run_scan(mode):
+def run_scan():
     try:
-        warnings = []
+        warnings = [ND_WARNING] if ND_WARNING else []
         update(phase="Reading Lidarr history" if LIDARR_URL else "Listing files")
         lidarr, retags, warn = fetch_lidarr_sources()
         if warn:
             warnings.append(warn)
         rules = load_json(SOURCES, {}).get("rules", [])
-        groups, bad = [], 0
-
-        if mode == "navidrome":
-            update(phase="Asking Navidrome")
-            nd = navidrome_groups()
-            update(phase="Reading tags", scanned=0, total=sum(len(g) for g in nd))
-            i = 0
-            for g in nd:
-                fs = []
-                for rel, album_id in g:
-                    i += 1
-                    f = load_file(rel)
-                    if f is None:
-                        bad += 1
-                        continue
-                    f["nd_album"] = album_id
-                    fs.append(f)
-                if len(fs) > 1:
-                    groups.append(fs)
-                if i % 100 < len(g):
-                    update(scanned=i)
-        else:
-            update(phase="Listing files")
-            rels = [os.path.relpath(p, MUSIC) for p in walk_audio()]
-            update(phase="Reading tags", total=len(rels))
-            buckets = defaultdict(list)
-            for i, rel in enumerate(rels, 1):
-                f = load_file(rel)
-                if f is None:
-                    bad += 1
-                else:
-                    k = group_key(f, mode)
-                    if k is not None:
-                        buckets[k].append(f)
-                if i % 250 == 0:
-                    update(scanned=i, unreadable=bad)
-                    CACHE.commit()
-            for g in buckets.values():
-                if len(g) < 2:
-                    continue
-                if mode == "cross-folder" and len({f["folder"] for f in g}) < 2:
-                    continue
-                groups.append(g)
+        bad = 0
+        update(phase="Listing files")
+        rels = [os.path.relpath(p, MUSIC) for p in walk_audio()]
+        update(phase="Reading tags", total=len(rels))
+        files = []
+        for i, rel in enumerate(rels, 1):
+            f = load_file(rel)
+            if f is None:
+                bad += 1
+            else:
+                files.append(f)
+            if i % 250 == 0:
+                update(scanned=i, unreadable=bad)
+                CACHE.commit()
+        groups = group_files(files)
         CACHE.commit()
 
         update(phase="Comparing")
@@ -1201,6 +1105,8 @@ if not os.path.exists(SOURCES):
 CACHE = TagCache(os.path.join(CONFIG, "tags.db"))
 
 app = FastAPI(title="music-dupes")
+if ND_WARNING:
+    print(f"music-dupes: {ND_WARNING}", flush=True)
 
 
 def host_allowed(host):
@@ -1246,7 +1152,7 @@ async def request_guard(request, call_next):
 
 
 class ScanReq(BaseModel):
-    mode: str = "same-folder"
+    mode: str | None = None  # ignored; older pages still send it
 
 
 class PathsReq(BaseModel):
@@ -1278,7 +1184,7 @@ def healthz():
 
 @app.get("/api/info")
 def info():
-    return {"music": MUSIC, "quarantine": QDIR, "navidrome": navidrome_source(),
+    return {"music": MUSIC, "quarantine": QDIR,
             "lidarr": bool(LIDARR_URL and LIDARR_KEY)}
 
 
@@ -1289,20 +1195,15 @@ def scan_state():
 
 
 @app.post("/api/scan")
-def start_scan(req: ScanReq):
-    if req.mode not in MODES:
-        raise HTTPException(400, f"Unknown mode: {req.mode}")
-    if req.mode == "navidrome" and not navidrome_source():
-        raise HTTPException(400, "Navidrome isn't configured. Set NAVIDROME_URL, "
-                                 "NAVIDROME_USER and NAVIDROME_PASSWORD.")
+def start_scan(req: ScanReq | None = None):
     with LOCK:
         if STATE["status"] == "scanning":
             raise HTTPException(409, "A scan is already running.")
-        STATE.update(status="scanning", scan_id=uuid.uuid4().hex, mode=req.mode,
+        STATE.update(status="scanning", scan_id=uuid.uuid4().hex,
                      phase="Starting", scanned=0, total=0, unreadable=0,
                      started=time.time(), finished=None, error=None,
                      warnings=[], clusters=[])
-    threading.Thread(target=run_scan, args=(req.mode,), daemon=True).start()
+    threading.Thread(target=run_scan, daemon=True).start()
     return {"ok": True}
 
 

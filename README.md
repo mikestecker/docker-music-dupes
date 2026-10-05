@@ -8,7 +8,8 @@ It's built for libraries that get fed by several pipelines at once (Lidarr, Tida
 - **Suggests only what it can prove.** Deluxe over standard, hi-res over CD quality, lossless over lossy. Anything it can't confirm goes to a Review list with nothing pre-selected.
 - **Inline player** with a "Switch copy" key so you can A/B two versions at the same timestamp.
 - **Quarantine, not delete.** Files are renamed into a hidden folder inside your library. Restore any batch later; permanent deletion is a separate, explicit step.
-- **Optional integrations:** Navidrome (group by its album IDs) and Lidarr (label which download client each file came from).
+- **One scan finds everything:** the same song anywhere in the library, the same album track even when its credits differ, and stray copies in one folder, tagged or not.
+- **Knows where files came from:** Lidarr's import and retag history, Tidarr downloads, iTunes purchases, plus your own rules.
 - Small: one Python file, one HTML file, no database server, no frontend build.
 
 > **No authentication.** Keep it on your LAN. If you put it behind a reverse proxy, add an access list or basic auth there. See [Reverse proxy](#reverse-proxy).
@@ -47,7 +48,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open `http://<your-server>:8095`, pick a match mode and hit **Scan library**.
+Open `http://<your-server>:8095` and hit **Scan library**.
 
 The first scan reads tags from every audio file, so on a big library over spinning disks expect it to take a few minutes. Results are cached in `/config/tags.db` keyed on path, size and modification time, so later scans only read files that changed.
 
@@ -124,11 +125,11 @@ TrueNAS Custom Apps don't read `.env` files (every `${VAR}` turns into an empty 
    sudo chown -R svc_apps:svc_apps /mnt/ssd-pool/apps/music-dupes
    ```
 
-2. Open `deploy/truenas.yaml`, change the host paths, the `user:` line, and the Navidrome/Lidarr values (or delete those lines if you don't use them).
+2. Open `deploy/truenas.yaml`, change the host paths, the `user:` line, and the Lidarr values (or delete those lines if you don't use Lidarr).
 3. In the TrueNAS UI go to **Apps → Discover Apps → ⋮ → Install via YAML**, name it `music-dupes` and paste the file.
 4. Open `http://<nas-ip>:8095`.
 
-Separate TrueNAS apps can't reach each other by container name, so use the NAS IP for `NAVIDROME_URL` and `LIDARR_URL`.
+Separate TrueNAS apps can't reach each other by container name, so use the NAS IP for `LIDARR_URL`.
 
 If your pool has periodic snapshots, permanently deleted files keep using space until the snapshots holding them expire. That's expected.
 
@@ -198,11 +199,6 @@ Everything is set with environment variables. Only the mounts are required.
 | `MUSIC_DIR` | `/music` | Library path inside the container |
 | `QUARANTINE_DIR` | `$MUSIC_DIR/.dupe-quarantine` | Where quarantined files go. Keep it inside the music mount. The app refuses to start if it's the library itself or a parent of it. |
 | `CONFIG_DIR` | `/config` | Where state is stored |
-| `NAVIDROME_URL` | | Navidrome base URL, e.g. `http://192.168.1.10:4533`. Enables Navidrome mode. |
-| `NAVIDROME_USER` | | Navidrome username (a non-admin user is fine) |
-| `NAVIDROME_PASSWORD` | | Navidrome password |
-| `NAVIDROME_MUSIC_ROOT` | `/music` | Library path **as Navidrome's container sees it** |
-| `NAVIDROME_DB` | `/navidrome/navidrome.db` | DB fallback, used only when the three vars above aren't set |
 | `LIDARR_URL` | | Lidarr base URL, e.g. `http://192.168.1.10:8686` |
 | `LIDARR_API_KEY` | | Lidarr API key (Settings → General → Security) |
 | `LIDARR_MUSIC_ROOT` | `/data/media/music` | Library path **as Lidarr's container sees it** |
@@ -221,20 +217,6 @@ The `*_MUSIC_ROOT` variables matter when your apps mount the same library at dif
 ---
 
 ## Optional integrations
-
-### Navidrome
-
-Navidrome mode groups tracks by Navidrome's own album IDs instead of by tags. The app still reads tags from the files, Navidrome is only used for grouping.
-
-1. Create a regular (non-admin) user in Navidrome for this app, e.g. `dupes`.
-2. Set `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASSWORD`, and `NAVIDROME_MUSIC_ROOT`.
-3. Run one scan in **Navidrome albums** mode. It'll fail and tell you to enable real paths, which is expected the first time.
-4. In Navidrome, log in as that user and go to **Settings → Players → music-dupes**, turn on **Report Real Path**, and save.
-5. Scan again.
-
-Without step 4, Navidrome reports made-up paths built from tags, and the app can't find the files.
-
-If you'd rather not use the API, leave those three variables empty and mount Navidrome's data folder read-only at `/navidrome` instead. The app copies the database to a temp folder before reading it and never touches the live file.
 
 ### Lidarr
 
@@ -270,14 +252,19 @@ With Lidarr connected, the app also reads Lidarr's **retag** history. A retag re
 
 ## Using it
 
-**Match modes**
+**Scanning**
 
-| Mode | Groups by | Good for |
-|---|---|---|
-| Artist and title (default) | artist + title anywhere | Catching everything: reissues, deluxe editions, misspelled folders, stray copies |
-| Same folder only | folder + disc + track + title | Quick cleanup of `Song (1).flac` style copies |
-| Same album tags | album artist + album + disc + track + title, across folders | Exact re-downloads |
-| Navidrome albums | Navidrome album IDs | If you trust Navidrome's grouping (needs setup above) |
+There's one scan. Two files are treated as possible copies if any of these match:
+
+| Match | Catches |
+|---|---|
+| Artist and title, anywhere | Reissues, deluxe editions, misspelled folders, copies under a different artist folder spelling |
+| Album artist, album, disc, track and title | The same album track when the track credits differ (`Artist, Guest` vs `Artist`) |
+| Folder and title (or filename when untagged) | Stray copies like `Song (1).flac`, tagged or not |
+
+Matching casts a wide net on purpose. What reaches Suggested is decided by the evidence (checksums, ISRCs, lengths, editions), so loose matches like two different songs called "Intro" land in Review with nothing selected.
+
+Earlier versions had separate match modes and a Navidrome mode. Navidrome reads the same files, so it never found anything a direct scan misses. If you still have `NAVIDROME_*` variables set, the app ignores them and says so in the scan warnings and the container log. You can delete them.
 
 **Sections**
 
@@ -316,7 +303,7 @@ Within a folder, ties on quality go to the copy that fits in: named like the oth
 
 Quality ranking is lossless over lossy, then bit depth, then sample rate. FLAC bitrate is ignored on purpose, since it only reflects how compressible the audio is.
 
-The full rule set is in [docs/HANDOFF.md](docs/HANDOFF.md#4-scan-pipeline-in-detail).
+The rules live in `app/app.py` (`classify`, `row_evidence`, `keep_rank`), with a test for each in `tests/test_classify.py`.
 
 ### Safety guarantees
 
@@ -324,7 +311,6 @@ The full rule set is in [docs/HANDOFF.md](docs/HANDOFF.md#4-scan-pipeline-in-det
 - Nothing is deleted without **Delete permanently** on a quarantine batch, with a confirmation.
 - Only files under the library mount (and outside the quarantine folder) can be read, played or moved.
 - Restore never overwrites a file that's come back in the meantime.
-- Navidrome's live database is never opened directly.
 - The quarantine folder starts with a dot and contains an `.ndignore`, so Navidrome and most scanners skip it.
 - Quarantine re-checks the disk first: if the copy being kept is gone or changed, or the file being moved isn't the one that was scanned, that track is skipped until you scan again.
 - Symlinks are never treated as copies, and nothing is ever moved through a symlink.
@@ -365,8 +351,6 @@ On TrueNAS, edit the app and save it, or use the update button once a new image 
 
 **Quarantine is slow, or you see cross-device errors.** The music folder is split across several mounts, or `QUARANTINE_DIR` points outside it. Mount the whole library once at `/music` and leave `QUARANTINE_DIR` alone.
 
-**Navidrome mode says paths don't exist.** Turn on **Report Real Path** for the `music-dupes` player in Navidrome (see [Navidrome](#navidrome)), and check `NAVIDROME_MUSIC_ROOT` matches where Navidrome mounts the library.
-
 **Lidarr sources show "Not from Lidarr" for everything.** `LIDARR_MUSIC_ROOT` doesn't match the path Lidarr uses. Check a file's path in Lidarr's history.
 
 **"music-dupes doesn't answer to the hostname ..."** You're using a domain name the app doesn't know. Add it to `ALLOWED_HOSTS`.
@@ -386,7 +370,6 @@ app/app.py          FastAPI backend: scanning, classification, quarantine
 app/index.html      the whole frontend (vanilla JS, no build step)
 tests/              pytest suite + fixture library generator + Playwright flow
 deploy/             TrueNAS and no-build compose files
-docs/HANDOFF.md     full design notes: every rule, API shape, known gaps
 ```
 
 Run the tests (needs `ffmpeg` on your PATH to generate the fixture library):

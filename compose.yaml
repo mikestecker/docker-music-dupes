@@ -17,10 +17,6 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
-      - NAVIDROME_URL=${NAVIDROME_URL:-}
-      - NAVIDROME_USER=${NAVIDROME_USER:-}
-      - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD:-}
-      - NAVIDROME_MUSIC_ROOT=${NAVIDROME_MUSIC_ROOT:-/music}
       - LIDARR_URL=${LIDARR_URL:-}
       - LIDARR_API_KEY=${LIDARR_API_KEY:-}
       - LIDARR_MUSIC_ROOT=${LIDARR_MUSIC_ROOT:-/data/media/music}
@@ -29,8 +25,5 @@ services:
       # Read-write: quarantine is a rename inside this mount. Keep the library
       # as ONE mount so moves stay instant (two mounts = cross-device copies).
       - ${MUSIC_PATH:?Set MUSIC_PATH in .env to your music library}:/music
-      # Navidrome DB fallback, only used when the NAVIDROME_URL/USER/PASSWORD
-      # trio is unset. The app copies the DB to /tmp and never writes here.
-      # - /path/to/navidrome/data:/navidrome:ro
     ports:
       - "${PORT:-8095}:8095"

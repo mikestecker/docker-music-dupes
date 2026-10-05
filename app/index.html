@@ -40,14 +40,7 @@
   .tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
 
   .controls { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-  .modes { display: flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
-  .modes label { padding: 8px 14px; cursor: pointer; color: var(--muted); border-right: 1px solid var(--line); }
-  .modes label:last-child { border-right: 0; }
-  .modes input { position: absolute; opacity: 0; pointer-events: none; }
-  .modes label:has(input:checked) { background: var(--bg); color: var(--ink); font-weight: 600; }
-  .modes label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
-  .modes label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
-  .mode-help { color: var(--muted); font-size: 13px; flex-basis: 100%; max-width: 80ch; margin: 0; }
+  .scan-help { color: var(--muted); font-size: 13px; flex-basis: 100%; max-width: 80ch; margin: 0; }
 
   .btn { border: 1px solid var(--line); background: var(--panel); padding: 7px 14px; border-radius: 9px; cursor: pointer; white-space: nowrap; }
   .btn:disabled { opacity: .5; cursor: default; }
@@ -209,14 +202,8 @@
 
   <section id="dupes-view">
     <div class="controls">
-      <div class="modes" role="radiogroup" aria-label="How to match tracks">
-        <label><input type="radio" name="mode" value="loose" checked><span>Artist and title</span></label>
-        <label><input type="radio" name="mode" value="same-folder"><span>Same folder only</span></label>
-        <label><input type="radio" name="mode" value="cross-folder"><span>Same album tags</span></label>
-        <label id="nd-mode" title="Set NAVIDROME_URL, NAVIDROME_USER and NAVIDROME_PASSWORD to enable this"><input type="radio" name="mode" value="navidrome" disabled><span>Navidrome albums</span></label>
-      </div>
       <button class="btn primary" id="scan">Scan library</button>
-      <p class="mode-help" id="mode-help"></p>
+      <p class="scan-help">Finds the same track wherever it is: matching artist and title, the same slot on the same album even when the credits differ, and stray copies in one folder, tagged or not. Tags and audio data decide what gets suggested.</p>
     </div>
     <div class="status" id="status"></div>
     <div class="warnings" id="warnings"></div>
@@ -276,12 +263,6 @@ const LETTERS = "ABCDEFGH";
 const PLAY = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1l7 4-7 4z"/></svg>';
 const PAUSE = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1h2v8H2zM6 1h2v8H6z"/></svg>';
 
-const HELP = {
-  "loose": "Matches the same artist and title anywhere, including inside one folder. Catches reissues, deluxe editions, misspelled folders and stray copies. Tags decide what gets suggested.",
-  "same-folder": "Only the same track twice inside one album folder, like a FLAC next to an AAC, or a curly versus straight apostrophe in the filename.",
-  "cross-folder": "Only copies with identical artist, album, disc, track and title tags in different folders. Misses editions whose album names differ.",
-  "navidrome": "Asks Navidrome which tracks it lists twice in one album, then reads those files' tags. Downloads since Navidrome's last scan won't appear.",
-};
 const SECTION_HELP = {
   suggested: "The tags make it clear which copies are redundant, so those are pre-selected and struck through. Open an album to check the evidence behind each track.",
   manual: "These need your ears. Nothing is selected. Play copies side by side, compare tags, then select what to remove or choose Keep both.",
@@ -387,8 +368,6 @@ async function refresh() {
     try { saved = JSON.parse(localStorage.getItem(`music-dupes:sel:${s.scan_id}`)); } catch {}
     S.selected = saved ? new Set(saved.filter(r => live.has(r))) : suggestedSel();
     S.limit = PAGE;
-    const r = document.querySelector(`input[name=mode][value="${s.mode}"]`);
-    if (r && !r.disabled) { r.checked = true; $("#mode-help").textContent = HELP[s.mode]; }
     if (!countIn("suggested") && countIn("manual")) S.section = "manual";
   } else {
     S.selected = new Set([...S.selected].filter(r => live.has(r)));
@@ -750,12 +729,10 @@ $("#clear-all").addEventListener("click", () => {
   toast(`Cleared ${plural(prev.size, "selected file")}.`, "Undo", () => { S.selected = prev; saveSel(); renderList(); renderBar(); });
 });
 
-document.querySelectorAll("input[name=mode]").forEach(r =>
-  r.addEventListener("change", () => { $("#mode-help").textContent = HELP[r.value]; }));
 
 $("#scan").addEventListener("click", async () => {
   try {
-    await api("api/scan", { mode: document.querySelector("input[name=mode]:checked").value });
+    await api("api/scan", {});
     refresh();
   } catch (err) { toast(err.message); }
 });
@@ -926,13 +903,8 @@ document.querySelectorAll("[data-tab]").forEach(t => t.addEventListener("click",
 
 // ---------- boot ----------
 
-$("#mode-help").textContent = HELP.loose;
 api("api/info").then(i => {
   $("#lib").textContent = `Library at ${i.music}`;
-  if (i.navidrome) {
-    $("#nd-mode input").disabled = false;
-    $("#nd-mode").title = i.navidrome === "api" ? "Uses Navidrome's API" : "Uses a snapshot of Navidrome's database";
-  }
 }).catch(() => {});
 refresh().catch(err => toast(err.message));
 </script>
