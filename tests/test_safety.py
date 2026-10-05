@@ -215,3 +215,26 @@ def test_quarantine_never_overwrites(app_mod, tmp_path):
     with pytest.raises(FileExistsError):
         app_mod.move(str(src), str(dst))
     assert dst.read_text() == "b" and src.exists()
+
+
+# ---------- #5 truncated FLAC ----------
+
+def test_truncated_flac_goes_to_review(scan, lib, album):
+    # The truncated copy gets the cleaner name and the older mtime, so before
+    # the fix it was kept and the intact copy was suggested for removal.
+    data = (lib[0] / "Lynyrd Skynyrd/Pronounced (1973)/08 Free Bird.flac").read_bytes()
+    bad, good = album / "08 Free Bird.flac", album / "08 Free Bird (1).flac"
+    bad.write_bytes(data[: len(data) // 3])
+    good.write_bytes(data)
+    os.utime(bad, (1, 1))
+    c = cluster(scan, lib, album)
+    assert (c["kind"], c["reason"]) == ("manual", "Possibly damaged copy")
+    assert suggested(c) == []
+    chips = [ch["text"] for ch in c["rows"][0]["evidence"]]
+    assert "Possibly damaged" in chips and "Identical audio" not in chips
+
+
+def test_identical_copies_still_suggested(scan, lib, album):
+    two_copies(lib, album)
+    c = cluster(scan, lib, album)
+    assert (c["kind"], c["reason"]) == ("suggested", "Duplicate files in one folder")

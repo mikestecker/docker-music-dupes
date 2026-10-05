@@ -518,6 +518,13 @@ def year_of(f):
 def row_evidence(g, single):
     md5s = [f["md5"] for f in g]
     identical = all(md5s) and len(set(md5s)) == 1
+    # Integrity, not quality: a FLAC's MD5 and length live in its header, so a
+    # truncated copy still "matches". mutagen's FLAC bitrate is measured from
+    # the audio bytes actually on disk, which barely moves between compression
+    # levels for the same audio, so a big gap means a copy is cut short.
+    rates = [f["kbps"] for f in g]
+    damaged = identical and min(rates) < 0.75 * max(rates)
+    identical = identical and not damaged
     isrcs = [f["isrc"] for f in g]
     same_isrc = all(isrcs) and len(set(isrcs)) == 1
     isrc_conflict = all(isrcs) and len(set(isrcs)) > 1
@@ -527,7 +534,10 @@ def row_evidence(g, single):
     same_fmt = len({score(f) for f in g if f["lossless"]}) == 1 and all(f["lossless"] for f in g)
     chips = []
     add = lambda tone, text, why="": chips.append({"tone": tone, "text": text, "why": why})
-    if identical:
+    if damaged:
+        add("warn", "Possibly damaged", "The audio checksums match, but one copy holds much less audio "
+            "data than the other, so it may be cut short or corrupt. Play each copy to the end.")
+    elif identical:
         add("good", "Identical audio", "The FLAC audio checksums match, so the decoded audio is bit-for-bit the same.")
     elif all(md5s) and same_fmt:
         add("neutral", "Audio differs", "Same format, but the decoded audio isn't bit-identical. Usually a different master, remaster or edit.")
@@ -543,7 +553,7 @@ def row_evidence(g, single):
         add("neutral", f"Length off by {spread:.1f}s", "Small gaps usually mean a different master or different padding.")
     else:
         add("warn", f"Length off by {fmt_len(spread)}", "Probably a different version, edit or recording.")
-    blocked = isrc_conflict or spread > LEN_TOL
+    blocked = isrc_conflict or spread > LEN_TOL or damaged
     if identical:
         confirmed = "identical"
     elif blocked:
@@ -554,7 +564,8 @@ def row_evidence(g, single):
         confirmed = "slot"  # same track slot in the same album folder
     else:
         confirmed = None
-    return {"chips": chips, "identical": identical, "isrc_conflict": isrc_conflict,
+    return {"chips": chips, "identical": identical, "damaged": damaged,
+            "isrc_conflict": isrc_conflict,
             "spread": spread, "blocked": blocked, "confirmed": confirmed,
             "has_isrc": all(isrcs)}
 
@@ -668,6 +679,12 @@ def classify(eds, rows, evs, single):
         return ("manual", "Different album artists",
                 "The same tracks are filed under different artists. Kept separate "
                 "unless you decide otherwise.", None)
+    n_damaged = sum(e["damaged"] for e in evs)
+    if n_damaged:
+        return ("manual", "Possibly damaged copy",
+                f"On {n_damaged} of {len(evs)} tracks one copy holds much less audio data "
+                "than another with the same checksum, so it may be cut short. Play each "
+                "copy to the end before removing anything.", None)
     n_conflict = sum(e["isrc_conflict"] for e in evs)
     if n_conflict:
         return ("manual", "Different recordings",
