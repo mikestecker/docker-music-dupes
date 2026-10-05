@@ -16,6 +16,7 @@ EXPECTED = {
     "Kutless": ("suggested", "Deluxe edition covers the standard",
                 "Hearts Of The Innocent (Special Edition) (2006)"),
     "Lynyrd Skynyrd": ("manual", "Track lengths differ", None),
+    "Mixtape": ("suggested", "Duplicate files in one folder", None),
 }
 
 
@@ -62,3 +63,11 @@ def test_other_modes_run(scan, mode):
     s = scan(mode)
     assert s["status"] == "done", s["error"]
     assert s["mode"] == mode
+
+
+def test_keeps_the_copy_that_fits_the_folder(loose):
+    # "03 Graveyard.flac" is named and dated unlike the rest of the album and
+    # has more tags; the album's own "01-03 Graveyard.flac" must stay.
+    files = loose["Mixtape"]["rows"][0]["files"]
+    assert [f["name"] for f in files if f["suggested"]] == ["03 Graveyard.flac"]
+    assert [f["name"] for f in files if f["stray"]] == ["03 Graveyard.flac"]

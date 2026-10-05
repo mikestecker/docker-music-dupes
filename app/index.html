@@ -121,6 +121,7 @@
   .f-name { font-size: 13px; overflow-wrap: anywhere; margin-top: 4px; }
   .f-meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top: 2px; }
   .lower { font-size: 12px; color: var(--remove); }
+  .stray { font-size: 12px; color: var(--warn); cursor: help; }
   .file.is-selected .f-name { text-decoration: line-through; color: var(--muted); }
   .file.is-selected .q { opacity: .5; }
   .src { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -553,6 +554,7 @@ function fileHtml(f, other) {
         <button class="play" data-play="${esc(f.rel)}" aria-label="${playing ? "Pause" : "Play"} ${esc(f.name)}">${playing && !$("#audio").paused ? PAUSE : PLAY}</button>
         <span class="time">${fmtTime(f.secs)}</span>
         ${f.quality === "lower" ? `<span class="lower">Lower quality</span>` : ""}
+        ${f.stray ? `<span class="stray" title="Named or dated differently from the rest of this folder, so it probably came from a separate download.">Doesn't match the folder</span>` : ""}
       </div>
       <div class="f-name">${diffHtml(f.name, other && other.name)}</div>
       <div class="f-meta"><span class="src" title="${esc(f.source_why)}">${esc(f.source)}</span><span>Added ${fmtDate(f.mtime)}</span></div>
