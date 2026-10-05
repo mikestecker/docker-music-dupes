@@ -1,0 +1,32 @@
+# No image at all: runs stock python:3.12-slim against the two source files.
+# Handy if you can't pull from a registry or want to hack on app.py live.
+# Deps are pip-installed into /tmp on every start (~10s).
+#
+#   mkdir -p /srv/music-dupes/{app,config}
+#   cp app/app.py app/index.html /srv/music-dupes/app/
+#
+# Updating = copy new app.py / index.html over and restart the container.
+services:
+  music-dupes:
+    image: python:3.12-slim
+    container_name: music-dupes
+    restart: unless-stopped
+    user: "1000:1000"
+    working_dir: /app
+    environment:
+      - TZ=UTC
+      - HOME=/tmp
+      - PYTHONPATH=/tmp/deps
+      - MUSIC_DIR=/music
+      - CONFIG_DIR=/config
+      # Same optional NAVIDROME_* / LIDARR_* variables as the main compose file.
+    command: >
+      sh -c "pip install --quiet --no-cache-dir --disable-pip-version-check
+      --target /tmp/deps fastapi==0.115.6 uvicorn==0.34.0 mutagen==1.47.0
+      && python -m uvicorn app:app --host 0.0.0.0 --port 8095"
+    volumes:
+      - /srv/music-dupes/app:/app:ro
+      - /srv/music-dupes/config:/config
+      - /path/to/music:/music
+    ports:
+      - 8095:8095

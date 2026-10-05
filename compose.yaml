@@ -1,0 +1,35 @@
+# music-dupes: generic Docker Compose setup.
+#
+#   cp .env.example .env    # then edit paths and optional integrations
+#   docker compose up -d    # pulls the published image
+#   docker compose up -d --build   # or build it from this checkout
+#
+# TrueNAS Custom Apps don't read .env files; use deploy/truenas.yaml there.
+services:
+  music-dupes:
+    image: ${IMAGE:-ghcr.io/mikestecker/docker-music-dupes:latest}
+    build: .
+    container_name: music-dupes
+    restart: unless-stopped
+    # Run as the user that owns your music, so quarantined/restored files keep
+    # their ownership. `id -u` / `id -g` on the host tells you the numbers.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      - TZ=${TZ:-UTC}
+      - NAVIDROME_URL=${NAVIDROME_URL:-}
+      - NAVIDROME_USER=${NAVIDROME_USER:-}
+      - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD:-}
+      - NAVIDROME_MUSIC_ROOT=${NAVIDROME_MUSIC_ROOT:-/music}
+      - LIDARR_URL=${LIDARR_URL:-}
+      - LIDARR_API_KEY=${LIDARR_API_KEY:-}
+      - LIDARR_MUSIC_ROOT=${LIDARR_MUSIC_ROOT:-/data/media/music}
+    volumes:
+      - ${CONFIG_PATH:-./config}:/config
+      # Read-write: quarantine is a rename inside this mount. Keep the library
+      # as ONE mount so moves stay instant (two mounts = cross-device copies).
+      - ${MUSIC_PATH:?Set MUSIC_PATH in .env to your music library}:/music
+      # Navidrome DB fallback, only used when the NAVIDROME_URL/USER/PASSWORD
+      # trio is unset. The app copies the DB to /tmp and never writes here.
+      # - /path/to/navidrome/data:/navidrome:ro
+    ports:
+      - "${PORT:-8095}:8095"

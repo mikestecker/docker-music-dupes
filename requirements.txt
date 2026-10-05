@@ -1,0 +1,5 @@
+# Runtime deps, pinned. Starlette 0.41.x (via FastAPI 0.115.6) serves HTTP Range
+# requests from FileResponse, which the inline audio player relies on.
+fastapi==0.115.6
+uvicorn==0.34.0
+mutagen==1.47.0

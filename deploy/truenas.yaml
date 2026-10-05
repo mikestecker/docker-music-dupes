@@ -1,0 +1,32 @@
+# TrueNAS SCALE: Apps -> Discover Apps -> (three dots) -> Install via YAML.
+#
+# Custom Apps don't load .env files and ${VAR} resolves to an empty string, so
+# every value is inlined. Replace the placeholders, but don't commit real
+# secrets back to git.
+services:
+  music-dupes:
+    image: ghcr.io/mikestecker/docker-music-dupes:latest
+    container_name: music-dupes
+    restart: unless-stopped
+    # The service account that owns your music (svc_apps is 3000:3000 here).
+    user: "3000:3000"
+    environment:
+      - TZ=America/Los_Angeles
+      # Optional Navidrome mode. Separate compose projects can't resolve each
+      # other by container name, so use the NAS IP.
+      - NAVIDROME_URL=http://10.0.9.101:4533
+      - NAVIDROME_USER=dupes
+      - NAVIDROME_PASSWORD=change_me
+      - NAVIDROME_MUSIC_ROOT=/music
+      # Optional Lidarr source lookup.
+      - LIDARR_URL=http://10.0.9.101:8686
+      - LIDARR_API_KEY=paste_lidarr_key_here
+      - LIDARR_MUSIC_ROOT=/data/media/music
+    volumes:
+      - /mnt/ssd-pool/apps/music-dupes/config:/config
+      # Keep this ONE read-write mount so quarantine stays an instant rename.
+      - /mnt/tank/media/music:/music
+      # Fallback only, used if the NAVIDROME_URL/USER/PASSWORD vars are unset.
+      # - /mnt/ssd-pool/apps/navidrome:/navidrome:ro
+    ports:
+      - 8095:8095

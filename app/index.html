@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Duplicate tracks</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='9' width='18' height='18' rx='4' fill='%230b7a5e'/%3E%3Crect x='11' y='5' width='18' height='18' rx='4' fill='none' stroke='%230b7a5e' stroke-width='3'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #eef1f0; --panel: #ffffff; --sunk: #f6f8f7; --ink: #16202b; --muted: #5d6873;
+    --line: #d5dbda; --hires: #4338a8; --lossless: #0b7a5e; --lossy: #b0542b;
+    --warn: #9a5b00; --danger: #b42318; --focus: #4338a8;
+    --diff: #f6dc94; --keep: #0b7a5e; --remove: #b0542b;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12171c; --panel: #1a2128; --sunk: #161c22; --ink: #e6eaed; --muted: #96a1ab;
+      --line: #2b353f; --hires: #a59cf2; --lossless: #4fc59f; --lossy: #e28b5f;
+      --warn: #e7b25a; --danger: #f0786b; --focus: #a59cf2;
+      --diff: rgba(231, 178, 90, .32); --keep: #4fc59f; --remove: #e28b5f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  main { max-width: 1240px; margin: 0 auto; padding: 32px 20px 200px; }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+
+  header { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; justify-content: space-between; }
+  h1 { font-size: 30px; line-height: 1.1; margin: 0; letter-spacing: -0.02em; }
+  .lib { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .tabs { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+  .tabs button { border: 0; background: none; padding: 6px 14px; border-radius: 7px; cursor: pointer; color: var(--muted); }
+  .tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
+
+  .controls { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .modes { display: flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+  .modes label { padding: 8px 14px; cursor: pointer; color: var(--muted); border-right: 1px solid var(--line); }
+  .modes label:last-child { border-right: 0; }
+  .modes input { position: absolute; opacity: 0; pointer-events: none; }
+  .modes label:has(input:checked) { background: var(--bg); color: var(--ink); font-weight: 600; }
+  .modes label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+  .modes label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .mode-help { color: var(--muted); font-size: 13px; flex-basis: 100%; max-width: 80ch; margin: 0; }
+
+  .btn { border: 1px solid var(--line); background: var(--panel); padding: 7px 14px; border-radius: 9px; cursor: pointer; white-space: nowrap; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600; }
+  .btn.small { padding: 4px 10px; font-size: 13px; }
+  .btn.danger { color: var(--danger); }
+  .link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; font-size: 13px; }
+  .link:hover { color: var(--ink); }
+
+  .status { margin-top: 18px; color: var(--muted); }
+  .warnings { color: var(--warn); font-size: 13px; margin-top: 6px; }
+  .meter { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; max-width: 420px; }
+  .meter > div { height: 100%; background: var(--ink); transition: width .3s; }
+
+  /* section switcher + filters stay reachable while scrolling */
+  .toolbar { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 14px 0 12px; margin-top: 18px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .sections { display: flex; gap: 6px; }
+  .sections button { border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 7px 14px; cursor: pointer; }
+  .sections button[aria-selected="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); font-weight: 600; }
+  .sections .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .toolbar .spacer { flex: 1; }
+  .search { padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); min-width: 240px; }
+  .reason-filter { padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+  .section-help { color: var(--muted); font-size: 14px; margin: 14px 0 0; max-width: 80ch; }
+
+  /* ---------- album card ---------- */
+  .album { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-top: 18px; overflow: hidden; }
+  .album-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: start; padding: 16px 18px 10px; }
+  .album-id { flex: 1 1 280px; min-width: 0; }
+  .album-id h2 { font-size: 19px; margin: 0; line-height: 1.25; letter-spacing: -0.01em; }
+  .album-id .by { color: var(--muted); }
+  .reason { display: inline-block; margin-top: 8px; font-size: 13px; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1.5px solid currentColor; }
+  .reason.suggested { color: var(--keep); }
+  .reason.manual { color: var(--warn); }
+  .reason.kept { color: var(--muted); }
+  .detail { margin: 6px 0 0; color: var(--muted); font-size: 14px; max-width: 78ch; }
+  .album-side { display: flex; flex-direction: column; align-items: end; gap: 8px; }
+  .album-stats { font-size: 13px; color: var(--muted); display: flex; gap: 12px; }
+  .album-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: end; }
+
+  .matrix { overflow-x: auto; border-top: 1px solid var(--line); }
+  .mgrid { display: grid; grid-template-columns: 3rem minmax(11rem, 15rem) repeat(var(--n), minmax(15rem, 1fr)); min-width: min-content; }
+  .mhead > div { padding: 12px 12px; background: var(--sunk); border-bottom: 1px solid var(--line); }
+  .mhead .h-label { color: var(--muted); font-size: 13px; align-self: end; }
+
+  .ed { border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .ed-role { font-size: 13px; font-weight: 700; color: var(--muted); }
+  .ed.keep { box-shadow: inset 3px 0 0 var(--keep); }
+  .ed.keep .ed-role { color: var(--keep); }
+  .ed.remove .ed-role { color: var(--remove); }
+  .ed-name { font-weight: 650; overflow-wrap: anywhere; }
+  .ed-path { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .ed-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; font-size: 13px; color: var(--muted); }
+  .ed-all { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-top: 4px; cursor: pointer; }
+  .ed-all input { width: 16px; height: 16px; margin: 0; }
+
+  .mrow > div { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .mrow:last-of-type > div { border-bottom: 0; }
+  .m-num { color: var(--muted); text-align: right; font-size: 14px; padding-top: 12px !important; }
+  .m-title .t { font-weight: 600; overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+  .chip { font-size: 12px; padding: 1px 7px; border-radius: 6px; background: var(--sunk); border: 1px solid var(--line); color: var(--muted); cursor: help; }
+  .chip.good { color: var(--keep); border-color: color-mix(in srgb, var(--keep) 40%, transparent); }
+  .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+  .mcell { border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+  .none { color: var(--muted); font-size: 13px; }
+
+  .file { display: grid; grid-template-columns: 20px 1fr; gap: 10px; align-items: start; }
+  .file > input { width: 18px; height: 18px; margin: 3px 0 0; cursor: pointer; }
+  .f-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .f-name { font-size: 13px; overflow-wrap: anywhere; margin-top: 4px; }
+  .f-meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top: 2px; }
+  .lower { font-size: 12px; color: var(--remove); }
+  .file.is-selected .f-name { text-decoration: line-through; color: var(--muted); }
+  .file.is-selected .q { opacity: .5; }
+  .src { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .time { color: var(--muted); font-size: 13px; }
+  .play { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); display: inline-grid; place-items: center; cursor: pointer; padding: 0; }
+  .play svg { width: 11px; height: 11px; fill: currentColor; }
+  .file.is-playing .play { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+  /* quality chip: the loud thing */
+  .q { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 8px; border-radius: 6px; border: 1.5px solid currentColor; width: max-content; }
+  .q b { font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+  .q span { font-size: 14px; font-weight: 650; }
+  .q.hires { color: var(--hires); }
+  .q.lossless { color: var(--lossless); }
+  .q.lossy { color: var(--lossy); }
+
+  mark { background: var(--diff); color: inherit; border-radius: 3px; padding: 0 1px; }
+
+  .tagpanel { grid-column: 1 / -1; background: var(--sunk); border-bottom: 1px solid var(--line); padding: 12px 16px 14px !important; }
+  .tp-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 8px; font-size: 13px; color: var(--muted); }
+  .tp-head label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  .tp-scroll { overflow-x: auto; }
+  table.tags { border-collapse: collapse; font-size: 13px; width: 100%; }
+  table.tags th, table.tags td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+  table.tags thead th { color: var(--muted); font-weight: 600; }
+  table.tags th[scope="row"] { color: var(--muted); font-weight: 500; white-space: nowrap; width: 1%; }
+  table.tags tr.group th { padding-top: 12px; color: var(--ink); font-weight: 650; border-bottom: 0; }
+  table.tags td.differs { background: color-mix(in srgb, var(--diff) 35%, transparent); }
+  .missing { color: var(--muted); font-style: italic; }
+
+  .expand { display: block; width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--sunk); padding: 9px; cursor: pointer; color: var(--muted); font-size: 14px; }
+  .expand:hover { color: var(--ink); }
+
+  .more { margin-top: 18px; }
+  .empty { margin-top: 40px; color: var(--muted); max-width: 64ch; }
+
+  /* ---------- player + action bar ---------- */
+  .dock { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); z-index: 10; }
+  .dock-inner { max-width: 1240px; margin: 0 auto; padding: 10px 20px; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+  .player { border-bottom: 1px solid var(--line); }
+  .p-info { min-width: 0; flex: 1 1 260px; }
+  .p-info b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .p-info span { font-size: 13px; color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .player audio { flex: 2 1 320px; height: 36px; }
+  .count { margin-right: auto; }
+  kbd { font: inherit; font-size: 12px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
+
+  .batch { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-top: 12px; padding: 14px 16px; }
+  .batch-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .batch-head .when { font-weight: 650; margin-right: auto; }
+  .batch details { margin-top: 8px; color: var(--muted); font-size: 13px; }
+  .batch ul { margin: 8px 0 0; padding-left: 18px; }
+
+  .toast { position: fixed; left: 50%; bottom: 150px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px; max-width: min(92vw, 600px); opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; display: flex; gap: 14px; align-items: center; }
+  .toast.show { opacity: 1; pointer-events: auto; }
+  .toast button { border: 0; background: none; color: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; padding: 0; }
+
+  @media (max-width: 760px) {
+    .mgrid { grid-template-columns: 1fr; min-width: 0; }
+    .mhead .h-label, .m-num { display: none; }
+    .ed, .mcell { border-left: 0; }
+    .mcell::before { content: attr(data-label); font-size: 12px; font-weight: 700; color: var(--muted); }
+    .album-side { align-items: start; }
+    .search { min-width: 0; flex: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Duplicate tracks</h1>
+      <div class="lib" id="lib"></div>
+    </div>
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="dupes">Duplicates</button>
+      <button role="tab" aria-selected="false" data-tab="quarantine">Quarantine</button>
+    </div>
+  </header>
+
+  <section id="dupes-view">
+    <div class="controls">
+      <div class="modes" role="radiogroup" aria-label="How to match tracks">
+        <label><input type="radio" name="mode" value="loose" checked><span>Artist and title</span></label>
+        <label><input type="radio" name="mode" value="same-folder"><span>Same folder only</span></label>
+        <label><input type="radio" name="mode" value="cross-folder"><span>Same album tags</span></label>
+        <label id="nd-mode" title="Set NAVIDROME_URL, NAVIDROME_USER and NAVIDROME_PASSWORD to enable this"><input type="radio" name="mode" value="navidrome" disabled><span>Navidrome albums</span></label>
+      </div>
+      <button class="btn primary" id="scan">Scan library</button>
+      <p class="mode-help" id="mode-help"></p>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="warnings" id="warnings"></div>
+
+    <div class="toolbar" id="toolbar" hidden>
+      <div class="sections" role="tablist" aria-label="Result sections">
+        <button role="tab" data-sec="suggested">Suggested<span class="n" id="n-suggested"></span></button>
+        <button role="tab" data-sec="manual">Review<span class="n" id="n-manual"></span></button>
+        <button role="tab" data-sec="kept">Kept both<span class="n" id="n-kept"></span></button>
+      </div>
+      <span class="spacer"></span>
+      <select class="reason-filter" id="reason" aria-label="Filter by reason"></select>
+      <input class="search" id="search" type="search" placeholder="Filter by artist, album or track (press /)" aria-label="Filter">
+      <button class="btn small" id="expand-all">Expand all</button>
+      <button class="btn small" id="collapse-all">Collapse all</button>
+    </div>
+    <p class="section-help" id="section-help"></p>
+    <div id="clusters"></div>
+  </section>
+
+  <section id="quarantine-view" hidden>
+    <p class="status">Quarantined files sit in a hidden folder inside your library that Navidrome ignores. Restore puts them back where they were.</p>
+    <div id="batches"></div>
+  </section>
+</main>
+
+<div class="dock">
+  <div class="player" id="player" hidden>
+    <div class="dock-inner">
+      <div class="p-info"><b id="p-title"></b><span id="p-sub"></span></div>
+      <audio id="audio" controls preload="metadata"></audio>
+      <button class="btn small" id="p-ab" title="Jump to the other copy at the same spot">Switch copy <kbd>B</kbd></button>
+      <button class="btn small" id="p-close">Close</button>
+    </div>
+  </div>
+  <div class="bar" id="bar" hidden>
+    <div class="dock-inner">
+      <span class="count" id="count"></span>
+      <button class="btn" id="clear-all">Clear selection</button>
+      <button class="btn primary" id="go">Quarantine selected</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"><span id="toast-msg"></span><button id="toast-act" hidden></button></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(1) + " MB";
+const fmtTime = s => { s = Math.round(s); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+const fmtDate = t => new Date(t * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+const plural = (n, w, p) => `${n.toLocaleString()} ${n === 1 ? w : (p || w + "s")}`;
+const base = p => p.split("/").pop();
+const parent = p => p.split("/").slice(0, -1).join("/");
+const LETTERS = "ABCDEFGH";
+const PLAY = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1l7 4-7 4z"/></svg>';
+const PAUSE = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1h2v8H2zM6 1h2v8H6z"/></svg>';
+
+const HELP = {
+  "loose": "Matches the same artist and title anywhere, including inside one folder. Catches reissues, deluxe editions, misspelled folders and stray copies. Tags decide what gets suggested.",
+  "same-folder": "Only the same track twice inside one album folder, like a FLAC next to an AAC, or a curly versus straight apostrophe in the filename.",
+  "cross-folder": "Only copies with identical artist, album, disc, track and title tags in different folders. Misses editions whose album names differ.",
+  "navidrome": "Asks Navidrome which tracks it lists twice in one album, then reads those files' tags. Downloads since Navidrome's last scan won't appear.",
+};
+const SECTION_HELP = {
+  suggested: "The tags make it clear which copies are redundant, so those are pre-selected and struck through. Open an album to check the evidence behind each track.",
+  manual: "These need your ears. Nothing is selected. Play copies side by side, compare tags, then select what to remove or choose Keep both.",
+  kept: "Albums you chose to keep. They stay out of the other lists on future scans until you show them again.",
+};
+const PAGE = 30;
+
+const S = {
+  clusters: [], scanId: null, selected: new Set(), section: "suggested",
+  query: "", reason: "", limit: PAGE,
+  open: new Map(), tags: new Set(), allFields: new Set(), player: null,
+};
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  } : undefined);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `Request failed with status ${r.status}`);
+  return data;
+}
+
+let toastTimer;
+function toast(msg, action, onAction) {
+  $("#toast-msg").textContent = msg;
+  const b = $("#toast-act");
+  b.hidden = !action;
+  b.textContent = action || "";
+  b.onclick = () => { $("#toast").classList.remove("show"); onAction(); };
+  $("#toast").style.bottom = `${document.querySelector(".dock").offsetHeight + 14}px`;
+  $("#toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("#toast").classList.remove("show"), action ? 9000 : 5000);
+}
+
+// ---------- word-level diff, so "of" vs "Of" or ' vs ’ stands out ----------
+
+function tokens(s) { return String(s).match(/[\p{L}\p{N}]+|\s+|./gu) || []; }
+function diffPair(a, b) {
+  const A = tokens(a), B = tokens(b), n = A.length, m = B.length;
+  const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const ra = [], rb = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { ra.push([A[i++], 0]); rb.push([B[j++], 0]); }
+    else if (L[i + 1][j] >= L[i][j + 1]) ra.push([A[i++], 1]);
+    else rb.push([B[j++], 1]);
+  }
+  while (i < n) ra.push([A[i++], 1]);
+  while (j < m) rb.push([B[j++], 1]);
+  return [ra, rb];
+}
+function marked(parts) {
+  let out = "", run = "", on = false;
+  const flush = () => { if (run) out += on && run.trim() ? `<mark>${esc(run)}</mark>` : esc(run); run = ""; };
+  for (const [t, d] of parts) { if (!!d !== on) { flush(); on = !!d; } run += t; }
+  flush();
+  return out;
+}
+// mine highlighted against other; plain if equal or nothing to compare
+const diffHtml = (mine, other) => other == null || mine === other ? esc(mine) : marked(diffPair(mine, other)[0]);
+
+// ---------- model helpers ----------
+
+const sectionOf = c => c.ignored ? "kept" : c.kind;
+const liveFiles = r => r.files.filter(f => !f.moved);
+const liveRows = c => c.rows.map((r, ri) => ({ r, ri })).filter(x => liveFiles(x.r).length > 1);
+const isOpen = c => S.open.has(c.key) ? S.open.get(c.key) : sectionOf(c) === "manual";
+const sizes = () => new Map(S.clusters.flatMap(c => c.rows.flatMap(r => r.files.map(f => [f.rel, f.size]))));
+const refEdition = c => Math.max(0, c.editions.findIndex(e => e.keep));
+
+function edRole(c, e, i) {
+  if (c.editions.length === 1) return ["Album folder", ""];
+  if (e.keep) return ["Keep", "keep"];
+  if (c.editions.some(x => x.keep)) return ["Remove matching tracks", "remove"];
+  return [`Edition ${LETTERS[i]}`, ""];
+}
+
+function saveSel() {
+  try { localStorage.setItem(`music-dupes:sel:${S.scanId}`, JSON.stringify([...S.selected])); } catch {}
+}
+function suggestedSel() {
+  return new Set(S.clusters.filter(c => !c.ignored)
+    .flatMap(c => c.rows.flatMap(r => liveFiles(r).filter(f => f.suggested).map(f => f.rel))));
+}
+
+// ---------- scan ----------
+
+async function refresh() {
+  const s = await api("api/scan");
+  renderStatus(s);
+  $("#scan").disabled = s.status === "scanning";
+  if (s.status === "scanning") { setTimeout(refresh, 800); return; }
+  if (s.status !== "done") { S.clusters = []; renderAll(); return; }
+  S.clusters = s.clusters;
+  const live = new Set(S.clusters.flatMap(c => c.rows.flatMap(r => liveFiles(r).map(f => f.rel))));
+  if (s.scan_id !== S.scanId) {
+    S.scanId = s.scan_id;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(`music-dupes:sel:${s.scan_id}`)); } catch {}
+    S.selected = saved ? new Set(saved.filter(r => live.has(r))) : suggestedSel();
+    S.limit = PAGE;
+    const r = document.querySelector(`input[name=mode][value="${s.mode}"]`);
+    if (r && !r.disabled) { r.checked = true; $("#mode-help").textContent = HELP[s.mode]; }
+    if (!countIn("suggested") && countIn("manual")) S.section = "manual";
+  } else {
+    S.selected = new Set([...S.selected].filter(r => live.has(r)));
+  }
+  saveSel();
+  renderAll();
+}
+
+function renderStatus(s) {
+  const el = $("#status");
+  $("#warnings").textContent = (s.warnings || []).join(" ");
+  if (s.status === "idle") {
+    el.textContent = "No scan yet. Pick how to match tracks, then scan your library.";
+  } else if (s.status === "scanning") {
+    const pct = s.total ? Math.round(100 * s.scanned / s.total) : 0;
+    const what = s.phase === "Reading tags" && s.total
+      ? `Reading tags, ${s.scanned.toLocaleString()} of ${s.total.toLocaleString()} files` : (s.phase || "Working");
+    el.innerHTML = `${esc(what)}<div class="meter"><div style="width:${s.phase === "Reading tags" ? pct : 4}%"></div></div>`;
+  } else if (s.status === "error") {
+    el.textContent = `The scan stopped: ${s.error}`;
+  } else {
+    el.textContent = `Scanned ${plural(s.total, "file")} on ${new Date(s.finished * 1000).toLocaleString()}.` +
+      (s.unreadable ? ` ${plural(s.unreadable, "file")} couldn't be read.` : "");
+  }
+}
+
+// ---------- rendering ----------
+
+const countIn = sec => S.clusters.filter(c => sectionOf(c) === sec && liveRows(c).length).length;
+
+function matches(c) {
+  if (S.reason && c.reason !== S.reason) return false;
+  const q = S.query.trim().toLowerCase();
+  if (!q) return true;
+  return [c.artist, c.album, ...c.editions.map(e => e.folder), ...c.rows.map(r => r.title)]
+    .join(" ").toLowerCase().includes(q);
+}
+
+function renderAll() {
+  const any = S.clusters.some(c => liveRows(c).length);
+  $("#toolbar").hidden = !any;
+  for (const sec of ["suggested", "manual", "kept"]) {
+    $(`#n-${sec}`).textContent = countIn(sec);
+    $(`[data-sec="${sec}"]`).setAttribute("aria-selected", S.section === sec);
+  }
+  const reasons = [...new Set(S.clusters.filter(c => sectionOf(c) === S.section && liveRows(c).length).map(c => c.reason))].sort();
+  if (!reasons.includes(S.reason)) S.reason = "";
+  $("#reason").innerHTML = `<option value="">All reasons</option>` +
+    reasons.map(r => `<option ${r === S.reason ? "selected" : ""}>${esc(r)}</option>`).join("");
+  $("#section-help").textContent = any ? SECTION_HELP[S.section] : "";
+  renderList();
+  renderBar();
+}
+
+function renderList() {
+  if (!S.scanId) { $("#clusters").innerHTML = ""; return; }
+  const list = S.clusters.map((c, ci) => [c, ci])
+    .filter(([c]) => sectionOf(c) === S.section && liveRows(c).length && matches(c));
+  if (!list.length) {
+    const empty = {
+      suggested: "Nothing left to clean up here. Check Review for albums that need a decision.",
+      manual: "Nothing needs a decision right now.",
+      kept: "You haven't kept any albums yet. Choose Keep both on an album in Review to park it here.",
+    };
+    $("#clusters").innerHTML = `<p class="empty">${S.query || S.reason ? "Nothing matches that filter." : empty[S.section]}</p>`;
+    return;
+  }
+  $("#clusters").innerHTML = list.slice(0, S.limit).map(([c, ci]) => cardHtml(c, ci)).join("") +
+    (list.length > S.limit ? `<button class="btn more" data-act="more">Show ${Math.min(PAGE, list.length - S.limit)} more of ${list.length - S.limit}</button>` : "");
+  afterRender($("#clusters"));
+}
+
+function afterRender(root) {
+  root.querySelectorAll("input[data-indet='1']").forEach(i => { i.indeterminate = true; });
+}
+
+function cardHtml(c, ci) {
+  const rows = liveRows(c), sec = sectionOf(c), open = isOpen(c), n = c.editions.length;
+  const files = rows.flatMap(x => liveFiles(x.r));
+  const sel = files.filter(f => S.selected.has(f.rel));
+  const hasSuggest = files.some(f => f.suggested);
+  return `<article class="album" data-ci="${ci}" aria-label="${esc(c.album)} by ${esc(c.artist)}">
+    <div class="album-head">
+      <div class="album-id">
+        <h2>${esc(c.album)}</h2>
+        <div class="by">${esc(c.artist)}</div>
+        <span class="reason ${sec}">${esc(c.reason)}</span>
+        <p class="detail">${esc(c.detail)}</p>
+      </div>
+      <div class="album-side">
+        <div class="album-stats">
+          <span>${plural(rows.length, "duplicate track")}</span>
+          <span>${sel.length ? `${sel.length} selected, ${fmtBytes(sel.reduce((a, f) => a + f.size, 0))}` : "None selected"}</span>
+        </div>
+        <div class="album-actions">
+          ${hasSuggest && sec !== "kept" ? `<button class="btn small" data-act="suggest">Select suggested</button>` : ""}
+          ${sec !== "kept" ? `<button class="btn small" data-act="all">Select all removable</button>` : ""}
+          <button class="btn small" data-act="none" ${sel.length ? "" : "disabled"}>Deselect all</button>
+          ${sec === "kept"
+            ? `<button class="btn small" data-act="unkeep">Show again</button>`
+            : `<button class="btn small" data-act="keep">Keep both</button>`}
+        </div>
+      </div>
+    </div>
+    <div class="matrix">
+      <div class="mgrid" style="--n:${n}">
+        <div class="mhead" style="display:contents">
+          <div class="h-label">#</div><div class="h-label">Track</div>
+          ${c.editions.map((e, i) => edHtml(c, e, i, rows)).join("")}
+        </div>
+        ${open ? rows.map(({ r, ri }) => rowHtml(c, r, ri)).join("") : ""}
+      </div>
+    </div>
+    <button class="expand" data-act="toggle" aria-expanded="${open}">${open ? "Hide tracks" : `Show ${plural(rows.length, "track")}`}</button>
+  </article>`;
+}
+
+function edHtml(c, e, i, rows) {
+  const ref = refEdition(c), n = c.editions.length;
+  const other = n < 2 ? null : c.editions[i === ref ? (ref === 0 ? 1 : 0) : ref];
+  const [role, cls] = edRole(c, e, i);
+  const fs = rows.flatMap(x => liveFiles(x.r).filter(f => f.ed === i));
+  const sel = fs.filter(f => S.selected.has(f.rel)).length;
+  return `<div class="ed ${cls}">
+    ${role ? `<div class="ed-role">${esc(role)}</div>` : ""}
+    <div class="ed-name">${diffHtml(base(e.folder), other && base(other.folder))}</div>
+    <div class="ed-path">${diffHtml(parent(e.folder), other && parent(other.folder))}</div>
+    <div class="ed-meta">
+      <span class="q ${e.tier}"><b>${esc(e.format)}</b><span>${esc(e.detail)}</span></span>
+      <span>${e.year || "No year tag"}</span>
+      <span>${plural(e.tracks, "track")} in folder</span>
+      ${e.deluxe ? "<span>Deluxe or expanded</span>" : ""}
+    </div>
+    <div class="ed-meta"><span>${esc(e.source)}</span><span>Added ${fmtDate(e.added)}</span></div>
+    ${n > 1 ? `<label class="ed-all"><input type="checkbox" data-ed="${i}" ${fs.length && sel === fs.length ? "checked" : ""}
+       data-indet="${sel && sel < fs.length ? 1 : 0}"> Select all ${fs.length} from this edition</label>` : ""}
+  </div>`;
+}
+
+function rowHtml(c, r, ri) {
+  const live = liveFiles(r), id = `${c.key}|${ri}`, tagsOpen = S.tags.has(id);
+  const cells = c.editions.map((e, i) => {
+    const fs = live.filter(f => f.ed === i);
+    const label = c.editions.length > 1 ? `Edition ${LETTERS[i]}: ${base(e.folder)}` : "";
+    return `<div class="mcell" data-label="${esc(label)}">${fs.length
+      ? fs.map(f => fileHtml(f, live.find(o => o !== f))).join("")
+      : `<span class="none">Not in this edition</span>`}</div>`;
+  }).join("");
+  return `<div class="mrow" style="display:contents">
+      <div class="m-num">${r.disc > 1 ? `${r.disc}-` : ""}${r.track ?? ""}</div>
+      <div class="m-title">
+        <div class="t">${esc(r.title)}</div>
+        <div class="chips">${r.evidence.map(ch => `<span class="chip ${ch.tone}" title="${esc(ch.why)}">${esc(ch.text)}</span>`).join("")}</div>
+        <button class="link" data-act="tags" data-ri="${ri}" aria-expanded="${tagsOpen}">${tagsOpen ? "Hide tags" : "Compare tags"}</button>
+      </div>
+      ${cells}
+    </div>${tagsOpen ? tagPanel(c, r, ri, live) : ""}`;
+}
+
+function fileHtml(f, other) {
+  const sel = S.selected.has(f.rel), playing = S.player && S.player.rel === f.rel;
+  return `<div class="file${sel ? " is-selected" : ""}${playing ? " is-playing" : ""}">
+    <input type="checkbox" data-rel="${esc(f.rel)}" ${sel ? "checked" : ""} aria-label="Remove ${esc(f.name)}">
+    <div>
+      <div class="f-top">
+        <span class="q ${f.tier}"><b>${esc(f.format)}</b><span>${esc(f.detail)}</span></span>
+        <button class="play" data-play="${esc(f.rel)}" aria-label="${playing ? "Pause" : "Play"} ${esc(f.name)}">${playing && !$("#audio").paused ? PAUSE : PLAY}</button>
+        <span class="time">${fmtTime(f.secs)}</span>
+        ${f.quality === "lower" ? `<span class="lower">Lower quality</span>` : ""}
+      </div>
+      <div class="f-name">${diffHtml(f.name, other && other.name)}</div>
+      <div class="f-meta"><span class="src" title="${esc(f.source_why)}">${esc(f.source)}</span><span>Added ${fmtDate(f.mtime)}</span></div>
+    </div>
+  </div>`;
+}
+
+const TAG_ORDER = ["title", "artist", "albumartist", "album", "date", "originaldate", "tracknumber", "discnumber", "isrc", "label", "copyright", "genre", "encoder", "comment"];
+const ALWAYS = new Set(["Format", "Length", "Audio MD5", "isrc"]);
+
+function tagPanel(c, r, ri, live) {
+  const id = `${c.key}|${ri}`, all = S.allFields.has(id);
+  const tagKeys = [...new Set(live.flatMap(f => Object.keys(f.tags)))]
+    .sort((a, b) => (TAG_ORDER.indexOf(a) + 1 || 99) - (TAG_ORDER.indexOf(b) + 1 || 99) || a.localeCompare(b));
+  const groups = [["Audio", Object.keys(live[0].props), f => f.props], ["Tags", tagKeys, f => f.tags]];
+  let hidden = 0;
+  const body = groups.map(([name, keys, get]) => {
+    const trs = keys.map(k => {
+      const vals = live.map(f => get(f)[k] ?? null);
+      const differs = new Set(vals.map(v => v ?? "")).size > 1;
+      if (!all && !differs && !ALWAYS.has(k)) { hidden++; return ""; }
+      return `<tr><th scope="row">${esc(k)}</th>${vals.map((v, i) => `<td class="${differs ? "differs" : ""}">${
+        v == null || v === "" ? `<span class="missing">missing</span>`
+        : differs ? diffHtml(v, vals[i === 0 ? 1 : 0] ?? "") : esc(v)}</td>`).join("")}</tr>`;
+    }).join("");
+    return trs ? `<tr class="group"><th colspan="${live.length + 1}">${name}</th></tr>${trs}` : "";
+  }).join("");
+  return `<div class="tagpanel">
+    <div class="tp-head">
+      <span>Highlighted cells differ between copies.${hidden && !all ? ` ${plural(hidden, "matching field")} hidden.` : ""}</span>
+      <label><input type="checkbox" data-allfields="${ri}" ${all ? "checked" : ""}> Show matching fields</label>
+    </div>
+    <div class="tp-scroll"><table class="tags">
+      <thead><tr><th></th>${live.map(f => `<th>${c.editions.length > 1 ? `Edition ${LETTERS[f.ed]}: ` : ""}${esc(f.name)}</th>`).join("")}</tr></thead>
+      <tbody>${body || `<tr><td colspan="${live.length + 1}" class="missing">Every field matches.</td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function rerenderCard(ci, focusSel) {
+  const el = document.querySelector(`.album[data-ci="${ci}"]`);
+  const c = S.clusters[ci];
+  if (!el) return;
+  if (sectionOf(c) !== S.section || !liveRows(c).length) { renderAll(); return; }
+  el.outerHTML = cardHtml(c, ci);
+  const fresh = document.querySelector(`.album[data-ci="${ci}"]`);
+  afterRender(fresh);
+  if (focusSel) fresh.querySelector(focusSel)?.focus();
+  renderBar();
+}
+
+function renderBar() {
+  const sz = sizes();
+  const n = S.selected.size;
+  const bytes = [...S.selected].reduce((a, r) => a + (sz.get(r) || 0), 0);
+  const fromReview = S.clusters.filter(c => sectionOf(c) === "manual")
+    .flatMap(c => c.rows.flatMap(liveFiles)).filter(f => S.selected.has(f.rel)).length;
+  $("#bar").hidden = !S.clusters.some(c => liveRows(c).length) || !$("#quarantine-view").hidden;
+  $("#count").textContent = n
+    ? `${plural(n, "file")} selected, ${fmtBytes(bytes)}${fromReview ? `, including ${fromReview} you picked in Review` : ""}`
+    : "Nothing selected";
+  $("#go").disabled = !n;
+  $("#clear-all").disabled = !n;
+  $("#go").textContent = n ? `Quarantine ${plural(n, "file")}` : "Quarantine selected";
+}
+
+// ---------- selection ----------
+
+function canSelect(r, rel) {
+  const live = liveFiles(r);
+  return live.filter(f => f.rel !== rel && !S.selected.has(f.rel)).length >= 1;
+}
+
+function selectWhere(c, pred) {
+  let skipped = 0;
+  for (const { r } of liveRows(c)) {
+    for (const f of liveFiles(r)) {
+      if (!pred(f) || S.selected.has(f.rel)) continue;
+      if (canSelect(r, f.rel)) S.selected.add(f.rel); else skipped++;
+    }
+  }
+  if (skipped) toast(`Skipped ${plural(skipped, "copy", "copies")} so one copy of every track stays.`);
+}
+
+$("#clusters").addEventListener("change", e => {
+  const card = e.target.closest(".album");
+  if (!card) return;
+  const ci = +card.dataset.ci, c = S.clusters[ci];
+  const t = e.target;
+  if (t.dataset.rel !== undefined) {
+    const rel = t.dataset.rel, r = c.rows.find(r => r.files.some(f => f.rel === rel));
+    if (t.checked) {
+      if (!canSelect(r, rel)) { t.checked = false; toast("Leave at least one copy of every track."); return; }
+      S.selected.add(rel);
+    } else S.selected.delete(rel);
+    saveSel();
+    rerenderCard(ci, `[data-rel="${CSS.escape(rel)}"]`);
+  } else if (t.dataset.ed !== undefined) {
+    const i = +t.dataset.ed;
+    if (t.checked) selectWhere(c, f => f.ed === i);
+    else liveRows(c).forEach(({ r }) => liveFiles(r).filter(f => f.ed === i).forEach(f => S.selected.delete(f.rel)));
+    saveSel();
+    rerenderCard(ci, `[data-ed="${i}"]`);
+  } else if (t.dataset.allfields !== undefined) {
+    const id = `${c.key}|${t.dataset.allfields}`;
+    S.allFields.has(id) ? S.allFields.delete(id) : S.allFields.add(id);
+    rerenderCard(ci, `[data-allfields="${t.dataset.allfields}"]`);
+  }
+});
+
+$("#clusters").addEventListener("click", async e => {
+  const playBtn = e.target.closest("[data-play]");
+  if (playBtn) { togglePlay(playBtn.dataset.play); return; }
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  if (btn.dataset.act === "more") { S.limit += PAGE; renderList(); return; }
+  const ci = +btn.closest(".album").dataset.ci, c = S.clusters[ci];
+  const files = liveRows(c).flatMap(x => liveFiles(x.r));
+  switch (btn.dataset.act) {
+    case "toggle":
+      S.open.set(c.key, !isOpen(c));
+      rerenderCard(ci, "[data-act=toggle]");
+      return;
+    case "tags": {
+      const id = `${c.key}|${btn.dataset.ri}`;
+      S.tags.has(id) ? S.tags.delete(id) : S.tags.add(id);
+      rerenderCard(ci, `[data-act=tags][data-ri="${btn.dataset.ri}"]`);
+      return;
+    }
+    case "suggest":
+      files.forEach(f => S.selected.delete(f.rel));
+      files.filter(f => f.suggested).forEach(f => S.selected.add(f.rel));
+      break;
+    case "all": {
+      // everything except the best copy of each track (keeper edition first)
+      files.forEach(f => S.selected.delete(f.rel));
+      const ref = c.editions.findIndex(e => e.keep);
+      for (const { r } of liveRows(c)) {
+        const live = liveFiles(r);
+        const keep = (ref >= 0 && live.find(f => f.ed === ref && f.quality === "best"))
+          || live.find(f => f.quality === "best") || live[0];
+        live.filter(f => f !== keep).forEach(f => S.selected.add(f.rel));
+      }
+      break;
+    }
+    case "none":
+      files.forEach(f => S.selected.delete(f.rel));
+      break;
+    case "keep":
+    case "unkeep": {
+      const kept = btn.dataset.act === "keep";
+      try {
+        await api("api/keep-both", { key: c.key, kept });
+        c.ignored = kept;
+        if (kept) files.forEach(f => S.selected.delete(f.rel));
+        saveSel();
+        renderAll();
+        toast(kept ? `Kept both copies of ${c.album}.` : `${c.album} is back in ${c.kind === "manual" ? "Review" : "Suggested"}.`,
+          "Undo", async () => {
+            await api("api/keep-both", { key: c.key, kept: !kept });
+            c.ignored = !kept;
+            renderAll();
+          });
+      } catch (err) { toast(err.message); }
+      return;
+    }
+  }
+  saveSel();
+  rerenderCard(ci, `[data-act="${btn.dataset.act}"]`);
+});
+
+$("#search").addEventListener("input", e => { S.query = e.target.value; S.limit = PAGE; renderList(); });
+$("#reason").addEventListener("change", e => { S.reason = e.target.value; S.limit = PAGE; renderList(); });
+document.querySelectorAll("[data-sec]").forEach(b => b.addEventListener("click", () => {
+  S.section = b.dataset.sec; S.limit = PAGE; S.reason = ""; renderAll();
+  window.scrollTo({ top: $("#toolbar").offsetTop - 4 });
+}));
+$("#expand-all").addEventListener("click", () => { S.clusters.forEach(c => S.open.set(c.key, true)); renderList(); });
+$("#collapse-all").addEventListener("click", () => { S.clusters.forEach(c => S.open.set(c.key, false)); renderList(); });
+$("#clear-all").addEventListener("click", () => {
+  const prev = new Set(S.selected);
+  S.selected.clear(); saveSel(); renderList(); renderBar();
+  toast(`Cleared ${plural(prev.size, "selected file")}.`, "Undo", () => { S.selected = prev; saveSel(); renderList(); renderBar(); });
+});
+
+document.querySelectorAll("input[name=mode]").forEach(r =>
+  r.addEventListener("change", () => { $("#mode-help").textContent = HELP[r.value]; }));
+
+$("#scan").addEventListener("click", async () => {
+  try {
+    await api("api/scan", { mode: document.querySelector("input[name=mode]:checked").value });
+    refresh();
+  } catch (err) { toast(err.message); }
+});
+
+$("#go").addEventListener("click", async () => {
+  const btn = $("#go");
+  btn.disabled = true;
+  btn.textContent = "Moving files";
+  if (S.player && S.selected.has(S.player.rel)) closePlayer();
+  try {
+    const r = await api("api/quarantine", { paths: [...S.selected] });
+    const msg = `Quarantined ${plural(r.moved, "file")}, ${fmtBytes(r.bytes)}.` +
+      (r.errors.length ? ` ${plural(r.errors.length, "problem")}: ${r.errors[0]}` : "");
+    await refresh();
+    if (r.moved) toast(msg, "Undo", async () => {
+      try {
+        const u = await api("api/restore", { batch: r.batch });
+        await refresh();
+        toast(`Restored ${plural(u.restored, "file")}.`);
+      } catch (err) { toast(err.message); }
+    });
+    else toast(msg);
+  } catch (err) {
+    toast(err.message);
+    renderBar();
+  }
+});
+
+// ---------- player ----------
+
+const audio = $("#audio");
+
+function findFile(rel) {
+  for (const c of S.clusters) for (const r of c.rows) {
+    const f = r.files.find(f => f.rel === rel);
+    if (f) return { c, r, f };
+  }
+  return null;
+}
+
+function togglePlay(rel) {
+  if (S.player && S.player.rel === rel) {
+    audio.paused ? audio.play() : audio.pause();
+    return;
+  }
+  load(rel, 0, true);
+}
+
+function load(rel, at, autoplay) {
+  const hit = findFile(rel);
+  if (!hit) return;
+  S.player = { rel };
+  audio.src = `api/audio?rel=${encodeURIComponent(rel)}`;
+  audio.onloadedmetadata = () => {
+    if (at) audio.currentTime = Math.min(at, audio.duration || at);
+    if (autoplay) audio.play().catch(() => {});
+  };
+  const { c, r, f } = hit;
+  $("#p-title").textContent = `${r.title}, ${c.artist}`;
+  $("#p-sub").textContent = `${c.editions.length > 1 ? `Edition ${LETTERS[f.ed]}, ` : ""}${f.format} ${f.detail}, ${f.rel}`;
+  $("#p-ab").disabled = liveFiles(r).length < 2;
+  $("#player").hidden = false;
+  syncPlayButtons();
+}
+
+function switchCopy() {
+  if (!S.player) return;
+  const hit = findFile(S.player.rel);
+  const live = liveFiles(hit.r);
+  const next = live[(live.findIndex(f => f.rel === S.player.rel) + 1) % live.length];
+  load(next.rel, audio.currentTime, !audio.paused);
+}
+
+function closePlayer() {
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  S.player = null;
+  $("#player").hidden = true;
+  syncPlayButtons();
+}
+
+function syncPlayButtons() {
+  document.querySelectorAll("[data-play]").forEach(b => {
+    const on = S.player && b.dataset.play === S.player.rel;
+    b.closest(".file").classList.toggle("is-playing", !!on);
+    b.innerHTML = on && !audio.paused ? PAUSE : PLAY;
+  });
+}
+audio.addEventListener("play", syncPlayButtons);
+audio.addEventListener("pause", syncPlayButtons);
+audio.addEventListener("error", () => { if (S.player) toast("This browser can't play that file, or it has moved."); });
+$("#p-ab").addEventListener("click", switchCopy);
+$("#p-close").addEventListener("click", closePlayer);
+
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input[type=search], input[type=text], select, textarea")) return;
+  if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
+  else if ((e.key === "b" || e.key === "B") && S.player) { e.preventDefault(); switchCopy(); }
+  else if (e.key === "Escape" && S.player) closePlayer();
+});
+
+// ---------- quarantine tab ----------
+
+async function loadBatches() {
+  const batches = await api("api/quarantine");
+  $("#batches").innerHTML = batches.length ? batches.map(b => `
+    <div class="batch">
+      <div class="batch-head">
+        <span class="when">${new Date(b.created * 1000).toLocaleString()}</span>
+        <span>${plural(b.files.length, "file")}, ${fmtBytes(b.bytes)}</span>
+        <button class="btn" data-restore="${b.batch}">Restore</button>
+        <button class="btn danger" data-purge="${b.batch}" data-n="${b.files.length}" data-bytes="${b.bytes}">Delete permanently</button>
+      </div>
+      <details><summary>Show files</summary>
+        <ul>${b.files.map(f => `<li>${esc(f.quality)}, ${esc(f.rel)}</li>`).join("")}</ul>
+      </details>
+    </div>`).join("") : `<p class="empty">Quarantine is empty.</p>`;
+}
+
+$("#batches").addEventListener("click", async e => {
+  const restore = e.target.dataset.restore, purgeId = e.target.dataset.purge;
+  try {
+    if (restore) {
+      const r = await api("api/restore", { batch: restore });
+      toast(`Restored ${plural(r.restored, "file")}.` +
+        (r.errors.length ? ` ${plural(r.errors.length, "file")} stayed in quarantine: ${r.errors[0]}` : ""));
+      refresh();
+    } else if (purgeId) {
+      const { n, bytes } = e.target.dataset;
+      if (!confirm(`Permanently delete ${plural(+n, "file")} (${fmtBytes(+bytes)})? Restore won't be possible after this.`)) return;
+      const r = await api("api/purge", { batch: purgeId });
+      toast(`Deleted ${fmtBytes(r.bytes)} permanently.`);
+    } else return;
+    loadBatches();
+  } catch (err) { toast(err.message); }
+});
+
+document.querySelectorAll("[data-tab]").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll("[data-tab]").forEach(x => x.setAttribute("aria-selected", x === t));
+  const q = t.dataset.tab === "quarantine";
+  $("#dupes-view").hidden = q;
+  $("#quarantine-view").hidden = !q;
+  renderBar();
+  if (q) loadBatches();
+}));
+
+// ---------- boot ----------
+
+$("#mode-help").textContent = HELP.loose;
+api("api/info").then(i => {
+  $("#lib").textContent = `Library at ${i.music}`;
+  if (i.navidrome) {
+    $("#nd-mode input").disabled = false;
+    $("#nd-mode").title = i.navidrome === "api" ? "Uses Navidrome's API" : "Uses a snapshot of Navidrome's database";
+  }
+}).catch(() => {});
+refresh().catch(err => toast(err.message));
+</script>
+</body>
+</html>
