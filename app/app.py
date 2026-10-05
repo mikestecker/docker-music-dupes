@@ -283,11 +283,37 @@ def load_json(path, default):
         return default
 
 
+def load_manifest():
+    """The quarantine manifest. Unlike the other stores it is never silently
+    reset: losing it would orphan every quarantined file."""
+    try:
+        with open(MANIFEST) as fh:
+            m = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise HTTPException(500, f"Can't read {MANIFEST} ({e}). Nothing was changed. "
+                                 "Fix or move that file, then try again.")
+    if not isinstance(m, dict):
+        raise HTTPException(500, f"{MANIFEST} isn't a quarantine manifest. Nothing was changed.")
+    return m
+
+
 def save_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    try:
+        fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def load_file(rel):
@@ -805,6 +831,8 @@ def library_path(rel):
 
 
 def move(src, dst):
+    if os.path.lexists(dst):  # os.rename would silently replace it
+        raise FileExistsError(errno.EEXIST, "a file already exists there", dst)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
         os.rename(src, dst)
@@ -928,44 +956,84 @@ def keep_both(req: KeepBothReq):
     return {"ok": True}
 
 
+def unchanged(f):
+    """True if the file is still exactly what the scan saw."""
+    try:
+        st = os.stat(library_path(f["rel"]))
+    except (ValueError, OSError):
+        return False
+    return st.st_size == f["size"] and st.st_mtime == f["mtime"]
+
+
+def new_batch_id(m):
+    while True:
+        bid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+        if bid not in m and not os.path.lexists(os.path.join(QDIR, bid)):
+            return bid
+
+
 @app.post("/api/quarantine")
 def quarantine(req: PathsReq):
-    with LOCK:
-        if STATE["status"] != "done":
-            raise HTTPException(409, "Run a scan first.")
-        rows = [r for c in STATE["clusters"] for r in c["rows"]]
-    wanted = set(req.paths)
-    batch = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-    moved, errors = [], []
-    for r in rows:
-        live = [f for f in r["files"] if not f["moved"]]
-        picks = [f for f in live if f["rel"] in wanted]
-        if not picks:
-            continue
-        if len(picks) >= len(live):  # server-side guard, never trust the client
-            errors.append(f"Skipped {r['title']}: every copy was selected, so nothing would be left.")
-            continue
-        for f in picks:
+    # MLOCK for the whole operation: two overlapping requests must not both
+    # pass the one-copy guard for the same track.
+    with MLOCK:
+        with LOCK:
+            if STATE["status"] != "done":
+                raise HTTPException(409, "Run a scan first.")
+            rows = [r for c in STATE["clusters"] for r in c["rows"]]
+        wanted = set(req.paths)
+        plan, errors = [], []
+        for r in rows:
+            live = [f for f in r["files"] if not f["moved"]]
+            picks = [f for f in live if f["rel"] in wanted]
+            if not picks:
+                continue
+            # The library may have changed since the scan (Lidarr upgrades,
+            # manual cleanup, another tab), so re-check against the disk.
+            keep = [f for f in live if f not in picks and unchanged(f)]
+            if not keep:
+                errors.append(f"Skipped {r['title']}: no other copy would be left, "
+                              "or it changed since the scan. Scan again.")
+                continue
+            for f in picks:
+                if unchanged(f):
+                    plan.append(f)
+                else:
+                    errors.append(f"Skipped {f['rel']}: it changed or moved since the scan. "
+                                  "Scan again.")
+        if not plan:
+            return {"batch": None, "moved": 0, "bytes": 0, "errors": errors}
+
+        # Record the batch before moving anything, so a full or read-only
+        # /config fails here instead of leaving files nobody can restore.
+        m = load_manifest()
+        batch = new_batch_id(m)
+        entry = lambda fs: [{"rel": f["rel"], "size": f["size"],
+                             "quality": f"{f['format']} {f['detail']}"} for f in fs]
+        m[batch] = {"created": time.time(), "files": entry(plan)}
+        save_json(MANIFEST, m)
+
+        moved = []
+        for f in plan:
             try:
                 move(library_path(f["rel"]), os.path.join(QDIR, batch, f["rel"]))
                 f["moved"] = True
-                moved.append({"rel": f["rel"], "size": f["size"],
-                              "quality": f"{f['format']} {f['detail']}"})
+                moved.append(f)
             except Exception as e:
                 errors.append(f"{f['rel']}: {e}")
-    if moved:
-        with MLOCK:
-            m = load_json(MANIFEST, {})
-            m[batch] = {"created": time.time(), "files": moved}
-            save_json(MANIFEST, m)
-    return {"batch": batch, "moved": len(moved),
+        if moved:
+            m[batch]["files"] = entry(moved)
+        else:
+            del m[batch]
+        save_json(MANIFEST, m)
+    return {"batch": batch if moved else None, "moved": len(moved),
             "bytes": sum(f["size"] for f in moved), "errors": errors}
 
 
 @app.get("/api/quarantine")
 def list_quarantine():
     with MLOCK:
-        m = load_json(MANIFEST, {})
+        m = load_manifest()
     out = []
     for bid in sorted(m, reverse=True):
         files = [f for f in m[bid]["files"]
@@ -985,19 +1053,23 @@ def get_batch(m, bid):
 @app.post("/api/restore")
 def restore(req: BatchReq):
     with MLOCK:
-        m = load_json(MANIFEST, {})
+        m = load_manifest()
         b = get_batch(m, req.batch)
         restored, remaining, errors, back = 0, [], [], set()
         for f in b["files"]:
             src = os.path.join(QDIR, req.batch, f["rel"])
-            if not os.path.exists(src):
+            if not os.path.lexists(src):
                 continue
-            dst = library_path(f["rel"])
-            if os.path.exists(dst):
+            try:
+                move(src, library_path(f["rel"]))
+            except FileExistsError:
                 errors.append(f"{f['rel']}: a file already exists there, left in quarantine.")
                 remaining.append(f)
                 continue
-            move(src, dst)
+            except Exception as e:  # keep going; one bad file mustn't strand the rest
+                errors.append(f"{f['rel']}: {e}, left in quarantine.")
+                remaining.append(f)
+                continue
             back.add(f["rel"])
             restored += 1
         bdir = os.path.join(QDIR, req.batch)
@@ -1020,11 +1092,23 @@ def restore(req: BatchReq):
 @app.post("/api/purge")
 def purge(req: BatchReq):
     with MLOCK:
-        m = load_json(MANIFEST, {})
+        m = load_manifest()
         b = get_batch(m, req.batch)
-        freed = sum(f["size"] for f in b["files"]
-                    if os.path.exists(os.path.join(QDIR, req.batch, f["rel"])))
-        shutil.rmtree(os.path.join(QDIR, req.batch), ignore_errors=True)
+        bdir = os.path.join(QDIR, req.batch)
+        here = lambda f: os.path.lexists(os.path.join(bdir, f["rel"]))
+        freed = sum(f["size"] for f in b["files"] if here(f))
+        try:
+            if os.path.lexists(bdir):
+                shutil.rmtree(bdir)
+        except OSError as e:
+            left = [f for f in b["files"] if here(f)]
+            if left:
+                b["files"] = left
+            else:
+                del m[req.batch]
+            save_json(MANIFEST, m)
+            raise HTTPException(500, f"Couldn't delete everything in that batch ({e}). "
+                                     f"{len(left)} files are still in quarantine.")
         del m[req.batch]
         save_json(MANIFEST, m)
     return {"bytes": freed}

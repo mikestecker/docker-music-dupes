@@ -878,7 +878,7 @@ $("#batches").addEventListener("click", async e => {
       const r = await api("api/purge", { batch: purgeId });
       toast(`Deleted ${fmtBytes(r.bytes)} permanently.`);
     } else return;
-    loadBatches();
+    await loadBatches();
   } catch (err) { toast(err.message); }
 });
 
@@ -888,7 +888,7 @@ document.querySelectorAll("[data-tab]").forEach(t => t.addEventListener("click",
   $("#dupes-view").hidden = q;
   $("#quarantine-view").hidden = !q;
   renderBar();
-  if (q) loadBatches();
+  if (q) loadBatches().catch(err => toast(err.message));
 }));
 
 // ---------- boot ----------
