@@ -271,6 +271,7 @@ Earlier versions had separate match modes and a Navidrome mode. Navidrome reads 
 
 - **Suggested:** the app is confident. Redundant copies are already selected. Look it over and hit **Quarantine**.
 - **Review:** the app can't decide (different artists, different recordings, can't confirm). Nothing is selected. Play copies side by side, compare tags, pick what to remove, or choose **Keep both**.
+- **Other albums:** the same recording on different releases. They stay, nothing is selected, and you can still pick a copy by hand.
 - **Kept both:** albums you've told it to leave alone. If a new copy shows up later, the album comes back for review.
 
 **Keyboard:** `/` focuses search, `B` switches the player to the next copy at the same timestamp, `Esc` closes the player.
@@ -290,9 +291,10 @@ The short version, in order of strength:
 Then, per album pair:
 
 - Different album artists → Review.
+- Different albums (an album and a single, a compilation or a best-of that share a recording) → **Other albums**, nothing selected. Both releases stay whole. Album names are compared without edition wording (deluxe, remaster, special edition, a year), and close spellings like `Fractured Heart` / `Fractioned Heart` still count as one album.
 - Any track with different ISRCs, or lengths more than 2.5s apart → Review.
 - One folder only holds tracks that are all in a more complete copy of the same album (say Tidarr grabbed three songs Lidarr already has) → suggest keeping the complete album. Every track must be within a second, and audio that's provably different is never covered.
-- One edition is deluxe/expanded/special and the other isn't → suggest keeping the deluxe one.
+- One edition is deluxe/expanded/special and the other isn't, and the deluxe one is at least as complete → suggest keeping the deluxe one.
 - Every track proven identical or the same recording → suggest keeping the best quality, then the most complete, best-tagged edition.
 - Anything else → Review.
 

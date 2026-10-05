@@ -146,6 +146,22 @@ def build(root):
     mk(2202, FL, 5, "Sourcey/Album (2019)/02 song.flac", "Song",
        "Sourcey", "Sourcey", "Album", "2019", 2, mtime=t0 + 600,
        compatible_brands="mp41dashcmfc", major_brand="iso8")
+    # One recording on three releases (album, best-of, single): all stay.
+    for folder, album, t, date in [("Album (2010)", "Album", 3, "2010"),
+                                   ("The Best Of (2015)", "The Best Of", 7, "2015"),
+                                   ("Hit (2009)", "Hit", 1, "2009")]:
+        mk(2300, FL, 5, f"Comp/{folder}/{t:02d} Hit.flac", "Hit", "Comp", "Comp", album, date, t,
+           "USCO10000001")
+    for t, title in [(1, "Intro"), (2, "Other")]:
+        mk(2300 + t, FL, 5, f"Comp/Album (2010)/{t:02d} {title}.flac", title, "Comp", "Comp",
+           "Album", "2010", t)
+    # A deluxe folder holding just one track of the standard album: the
+    # standard is the complete one, so the deluxe copy is the partial.
+    for t, title in [(1, "A"), (2, "B"), (3, "C")]:
+        mk(2400 + t, FL, 5, f"Dlx/Album (2019)/{t:02d} {title}.flac", title, "Dlx", "Dlx",
+           "Album", "2019", t)
+    mk(2402, FL, 5, "Dlx/Album (Deluxe) (2019)/02 B.flac", "B", "Dlx", "Dlx",
+       "Album (Deluxe)", "2019", 2)
 
 
 if __name__ == "__main__":

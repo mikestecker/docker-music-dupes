@@ -24,6 +24,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from statistics import mean
 
 import mutagen
@@ -82,6 +83,15 @@ DELUXE_RE = re.compile(
     r"\b(deluxe|expanded|special edition|super deluxe|bonus tracks?|"
     r"collector'?s|anniversary|extended|complete edition)\b", re.I)
 YEAR_RE = re.compile(r"\((\d{4})\)")
+# Edition wording that doesn't make a different album: "(Deluxe Edition)",
+# "[2011 Remaster]", "(Special Edition)", "(2019)", "Album - Remastered 2009"
+EDITION_WORDS = (r"deluxe|expanded|special|collector'?s|anniversary|complete|edition|"
+                 r"remaster(?:ed)?|bonus|explicit|clean|version|extended|reissue")
+EDITION_RE = re.compile(
+    rf"\s*[(\[][^)\]]*\b(?:{EDITION_WORDS})\b[^)\]]*[)\]]"
+    r"|\s*[(\[]\s*\d{4}\s*[)\]]"
+    rf"|\s+-\s+[^-]*\b(?:{EDITION_WORDS})\b[^-]*$", re.I)
+SAME_ALBUM = 0.75  # name similarity above which two albums are one (typos)
 COPY_RE = re.compile(r"\s*\(\d+\)$")
 # Track-number prefix of a filename: "01-03 ", "03 ", "1. ", "03 - "
 PREFIX_RE = re.compile(r"^\d{1,3}(?:[-.]\d{1,3})?(?:\s*[-._]\s*|\s+)?")
@@ -933,12 +943,27 @@ def build_cluster(folders, rows, ignored, folder_cache):
             "artist": eds[0]["artist"], "album": eds[0]["album"]}
 
 
+def album_key(album):
+    """An album name without edition wording, for telling editions of one
+    album apart from different albums."""
+    return norm(EDITION_RE.sub("", album or ""))
+
+
+def same_album(a, b):
+    """Editions of one album (deluxe, remaster, a typo in the name) rather than
+    two releases that share a song (an album and a single, a best-of, a
+    compilation). Fractured/Fractioned Heart scores 0.84; Nevermind vs The
+    Very Best 0.36."""
+    a, b = album_key(a), album_key(b)
+    return not a or not b or a == b or SequenceMatcher(None, a, b).ratio() >= SAME_ALBUM
+
+
 def partial_copy(eds, rows, evs):
     """(complete edition, [partial editions]) when every other edition is a
     folder whose audio files are all duplicated in one more complete edition of
     the same album, else None. A stray partial download (Tidarr grabbing a few
     tracks Lidarr already has) shouldn't need a decision per track."""
-    if len(eds) < 2 or len({norm(e["album"]) for e in eds}) > 1:
+    if len(eds) < 2 or len({album_key(e["album"]) for e in eds}) > 1:
         return None
     in_rows = Counter(f["folder"] for g in rows for f in g)
     whole = max(eds, key=lambda e: e["tracks"])
@@ -961,6 +986,12 @@ def classify(eds, rows, evs, single):
         return ("manual", "Different album artists",
                 "The same tracks are filed under different artists. Kept separate "
                 "unless you decide otherwise.", None)
+    if not single and not all(same_album(a["album"], b["album"])
+                              for i, a in enumerate(eds) for b in eds[i + 1:]):
+        return ("other", "Same song on another album",
+                "These are different releases (an album, a single, a compilation or a "
+                "best-of) that share a recording. Both stay, so nothing is selected. "
+                "Select a copy yourself if you don't want the song twice.", None)
     n_damaged = sum(e["damaged"] for e in evs)
     if n_damaged:
         return ("manual", "Possibly damaged copy",
@@ -986,21 +1017,28 @@ def classify(eds, rows, evs, single):
         return ("manual", "Couldn't confirm duplicates",
                 "Same folder, but the lengths or recordings don't line up.", None)
 
+    deluxe = [e for e in eds if e["deluxe"]]
+    if deluxe and len(deluxe) < len(eds):
+        keeper = max(deluxe, key=lambda e: (e["tracks"], e["tag_count"]))
+        # a partial deluxe folder doesn't cover a fuller standard edition
+        if all(keeper["tracks"] >= e["tracks"] for e in eds):
+            return ("suggested", "Deluxe edition covers the standard",
+                    f"Keeping {keeper['album']}, which has {keeper['tracks']} tracks. "
+                    "Matching tracks in the standard edition are selected.", keeper["folder"])
+
     partial = partial_copy(eds, rows, evs)
     if partial:
         whole, parts = partial
         names = ", ".join(os.path.basename(e["folder"]) for e in parts)
+        n = sum(e["tracks"] for e in parts)
+        lead = (f"{names} would normally win as the bigger edition, but only "
+                f"{n} of its tracks {'is' if n == 1 else 'are'} here"
+                if any(e["deluxe"] for e in parts) else f"{names} only holds tracks")
         return ("suggested", "Complete album covers a partial copy",
-                f"{names} only holds tracks that are all in {whole['album']} "
-                f"({whole['tracks']} tracks), with matching lengths. Keeping the complete "
-                "album; the partial copies are selected.", whole["folder"])
+                f"{lead}, all also in {whole['album']} ({whole['tracks']} tracks) with "
+                "matching lengths. Keeping the complete album; the partial copies are "
+                "selected.", whole["folder"])
 
-    deluxe = [e for e in eds if e["deluxe"]]
-    if deluxe and len(deluxe) < len(eds):
-        keeper = max(deluxe, key=lambda e: (e["tracks"], e["tag_count"]))
-        return ("suggested", "Deluxe edition covers the standard",
-                f"Keeping {keeper['album']}, which has {keeper['tracks']} tracks. "
-                "Matching tracks in the standard edition are selected.", keeper["folder"])
 
     if all(e["confirmed"] in ("identical", "recording") for e in evs):
         best_count = Counter()
