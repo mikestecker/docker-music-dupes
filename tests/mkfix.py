@@ -81,6 +81,15 @@ def build(root):
            "Mixtape", "Mixtape", "Manic", "2020", t, mtime=sep23 + i, disc=str(d))
     mk(1402, FL, 5, "Mixtape/Manic (2020)/03 Graveyard.flac", "Graveyard", "Mixtape", "Mixtape",
        "Manic", "2020", 3, mtime=oct3, comment="tidal", label="Some Label", copyright="2020")
+    # Same tags, different master: the album's 16/44.1 copy vs a later 16/48
+    # stray named "20 Title" though its tags say disc 2, track 5.
+    sep22, oct3b = 1758575160, 1759531500
+    for i, (d, t, title, dur) in enumerate([(1, 1, "Why", 5), (2, 4, "Any Old Barstool", 5),
+                                            (2, 5, "You Make It Easy", 9), (2, 6, "Drowns the Whiskey", 5)]):
+        mk(1500 + i, FL, dur, f"Countryman/Hits (2025)/{d:02d}-{t:02d} {title}.flac", title,
+           "Countryman", "Countryman", "Hits", "2025", t, mtime=sep22 + i, disc=str(d))
+    mk(1550, ["-c:a", "flac", "-ar", "48000"], 5.5, "Countryman/Hits (2025)/20 You Make It Easy.flac",
+       "You Make It Easy", "Countryman", "Countryman", "Hits", "2025", 5, mtime=oct3b, disc="2")
 
 
 if __name__ == "__main__":

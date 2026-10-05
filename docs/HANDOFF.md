@@ -115,6 +115,8 @@ score(f) = (1, bits, rate, 0) if lossless else (0, 0, 0, kbps)
 ```
 FLAC bitrate is deliberately ignored (it only reflects compressibility). An earlier version used it as a tiebreak and produced false "Lower quality" labels between identical-format FLACs; don't reintroduce that. ALAC detection: `codec == "alac"` (mutagen) or, for Navidrome-sourced metadata with no codec, m4a with bitrate >= 500 kbps.
 
+Decisions (keeper ranking, the "Lower quality" label, the post-check and best-count below) use `qclass(f)`, which is `score(f)` with 44.1 kHz and 48 kHz at the same bit depth treated as equal; above 48 kHz the rate still counts. Exact `score` stays as a later tiebreak.
+
 Tiers for the UI chip colour: `hires` (lossless and >16-bit or >48 kHz), `lossless`, `lossy`.
 
 ### 4.4 Per-track evidence (`row_evidence`)
@@ -142,7 +144,9 @@ Deluxe regex (album tag + folder name): `deluxe|expanded|special edition|super d
 6. **All tracks identical or same recording** → suggested, "Identical audio" or "Same recordings". Keeper ranked by: number of tracks where it holds the best quality, folder track count, mean tag count, earliest year. Detail text notes when release years differ but audio is the same.
 7. Otherwise → manual, "Couldn't confirm same recordings".
 
-**Post-check:** for suggested clusters, each track keeps the best copy *in the keeper folder* (ranked by score, then fit with the folder, no ` (n)` filename suffix, more tags, older mtime). Fit counts the other audio files in the folder, excluding the copies being compared, that share the copy's track-number prefix shape and extension (`01-03 ` → `99-99 `), plus those written within an hour of it (same download batch). A copy scoring under half the best fit in its folder is flagged `stray` and shown as "Doesn't match the folder". Fit only picks the keeper; it never confirms a duplicate. If any other copy in that track is higher quality than the kept one, the whole cluster is downgraded to manual: "Better quality in the edition we'd remove". This is what protects a hi-res standard edition from a CD-quality deluxe.
+**Post-check:** for suggested clusters, each track keeps the best copy *in the keeper folder* (ranked by quality class, then fit with the folder, then exact score, no ` (n)` filename suffix, more tags, older mtime). Fit counts the other audio files in the folder, excluding the copies being compared, that share the copy's track-number prefix shape and extension (`01-03 ` → `99-99 `), plus those written within an hour of it (same download batch). A third signal is whether the filename's track number (`02-05 `, `20 `) agrees with the file's own disc/track tags; a disagreement subtracts a full point. Fit is normalized to -1..1. A copy more than 0.5 below the best fit in its folder is flagged `stray` and shown as "Doesn't match the folder", and every copy carries a `fit` line ({tone, text}) saying why, e.g. "Added 11 days after the rest of the folder, named "20 Title" though its tags say 2-5". `keep_pref` marks the copy "Select all removable" keeps. Fit only picks the keeper; it never confirms a duplicate.
+
+Edition headers describe the folder's majority format (`format_count` of `tracks`) and its median added time, not the best or newest file. If any other copy in that track is higher quality than the kept one, the whole cluster is downgraded to manual: "Better quality in the edition we'd remove". This is what protects a hi-res standard edition from a CD-quality deluxe.
 
 Manual clusters never pre-select anything.
 

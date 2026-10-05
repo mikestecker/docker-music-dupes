@@ -304,7 +304,7 @@ Then, per album pair:
 
 Last check: if the edition it would keep has a lower-quality copy of any track than the one it would remove (say a CD-quality deluxe vs a hi-res standard), the whole album gets bumped to Review.
 
-Within a folder, ties on quality go to the copy that fits in: named like the other tracks (`01-03 Title` vs `03 Title`) and written in the same download batch. A later stray re-download gets marked "Doesn't match the folder" and is the one selected.
+Within a folder, ties on quality go to the copy that fits in: named like the other tracks (`01-03 Title` vs `03 Title`), written in the same download batch, and with a filename that agrees with its own track tags. Each copy shows a line saying how it fits, and a later stray re-download gets marked "Doesn't match the folder". 44.1 kHz and 48 kHz at the same bit depth count as the same quality, so a stray at 48 kHz doesn't outrank the album's 44.1 kHz copy.
 
 Quality ranking is lossless over lossy, then bit depth, then sample rate. FLAC bitrate is ignored on purpose, since it only reflects how compressible the audio is.
 
