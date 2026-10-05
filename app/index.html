@@ -125,6 +125,7 @@
   .f-fit { font-size: 12px; color: var(--muted); margin-top: 2px; }
   .f-fit.good { color: var(--keep); }
   .f-fit.warn { color: var(--warn); }
+  .upgrade { margin-top: 6px; }
   .file.is-selected .f-name { text-decoration: line-through; color: var(--muted); }
   .file.is-selected .q { opacity: .5; }
   .src { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -562,6 +563,8 @@ function fileHtml(f, other) {
       <div class="f-name">${diffHtml(f.name, other && other.name)}</div>
       ${f.fit && f.fit.text ? `<div class="f-fit ${esc(f.fit.tone)}">${esc(f.fit.text)}</div>` : ""}
       <div class="f-meta"><span class="src" title="${esc(f.source_why)}">${esc(f.source)}</span><span>Added ${fmtDate(f.mtime)}</span></div>
+      ${f.upgrade ? `<button class="btn small upgrade" data-upgrade="${esc(f.rel)}"
+        title="Moves this file into ${esc(f.upgrade.folder)} as ${esc(f.upgrade.name)} and quarantines the ${esc(f.upgrade.replaces)} copy that's there now. Undo puts both back.">Replace the album's ${esc(f.upgrade.replaces)} copy</button>` : ""}
     </div>
   </div>`;
 }
@@ -672,6 +675,8 @@ $("#clusters").addEventListener("change", e => {
 $("#clusters").addEventListener("click", async e => {
   const playBtn = e.target.closest("[data-play]");
   if (playBtn) { togglePlay(playBtn.dataset.play); return; }
+  const upBtn = e.target.closest("[data-upgrade]");
+  if (upBtn) { upgrade(upBtn.dataset.upgrade, upBtn); return; }
   const btn = e.target.closest("[data-act]");
   if (!btn) return;
   if (btn.dataset.act === "more") { S.limit += PAGE; renderList(); return; }
@@ -779,6 +784,26 @@ $("#go").addEventListener("click", async () => {
   }
 });
 
+async function upgrade(rel, btn) {
+  const hit = findFile(rel);
+  if (!hit) return;
+  const up = hit.f.upgrade;
+  if (S.player && (S.player.rel === rel || S.player.rel === up.replace)) closePlayer();
+  btn.disabled = true;
+  try {
+    const r = await api("api/upgrade", { rel });
+    S.selected.delete(rel); S.selected.delete(up.replace); saveSel();
+    await refresh();
+    toast(`${up.name} is now the ${hit.f.format} ${hit.f.detail} copy. The ${up.replaces} copy is in quarantine.`, "Undo", async () => {
+      try {
+        const u = await api("api/restore", { batch: r.batch });
+        await refresh();
+        toast(u.errors.length ? u.errors[0] : "Put both files back.");
+      } catch (err) { toast(err.message); }
+    });
+  } catch (err) { btn.disabled = false; toast(err.message); }
+}
+
 // ---------- player ----------
 
 const audio = $("#audio");
@@ -866,7 +891,8 @@ async function loadBatches() {
         <button class="btn danger" data-purge="${b.batch}" data-n="${b.files.length}" data-bytes="${b.bytes}">Delete permanently</button>
       </div>
       <details><summary>Show files</summary>
-        <ul>${b.files.map(f => `<li>${esc(f.quality)}, ${esc(f.rel)}</li>`).join("")}</ul>
+        <ul>${b.files.map(f => `<li>${esc(f.quality)}, ${esc(f.rel)}</li>`).join("")}
+          ${(b.moves || []).map(m => `<li>Replaced by the ${esc(m.quality)} copy from ${esc(m.from)}. Restore moves it back.</li>`).join("")}</ul>
       </details>
     </div>`).join("") : `<p class="empty">Quarantine is empty.</p>`;
 }

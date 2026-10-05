@@ -18,6 +18,8 @@ EXPECTED = {
     "Lynyrd Skynyrd": ("manual", "Track lengths differ", None),
     "Countryman": ("manual", "Track lengths differ", None),
     "Mixtape": ("suggested", "Duplicate files in one folder", None),
+    "Half\u00b7Alive": ("manual", "Better copies in a partial folder", None),
+    "Partly": ("suggested", "Complete album covers a partial copy", "Album (2018)"),
 }
 
 
@@ -127,3 +129,54 @@ def test_quality_class(app_mod):
     assert q(24, 48000) > q(16, 48000)
     assert q(24, 96000) > q(24, 48000)
     assert q(16, 44100) > app_mod.qclass({"lossless": False, "bits": 0, "rate": 44100, "kbps": 320})
+
+
+TIDARR = "Half\u00b7Alive/Now (2019)"
+LIDARR = "Half\u2022Alive/Now (2019)"
+
+
+@pytest.fixture(scope="module")
+def halfalive(loose):
+    return loose["Half\u00b7Alive"]
+
+
+def test_featuring_credit_pairs_tracks(halfalive):
+    titles = sorted(r["title"] for r in halfalive["rows"])
+    assert len(titles) == 3 and any(t.startswith("Rest") for t in titles)
+    rest = next(r for r in halfalive["rows"] if r["title"].startswith("Rest"))
+    assert "Credits differ" in [c["text"] for c in rest["evidence"]]
+
+
+def test_tidarr_source_is_detected(halfalive):
+    files = [f for r in halfalive["rows"] for f in r["files"]]
+    assert {f["source"] for f in files if f["rel"].startswith(TIDARR)} == {"Tidarr"}
+    assert "Tidarr" not in {f["source"] for f in files if f["rel"].startswith(LIDARR)}
+
+
+def test_hires_partial_offers_upgrade_not_removal(halfalive):
+    files = [f for r in halfalive["rows"] for f in r["files"]]
+    assert not any(f["suggested"] for f in files)
+    for r in halfalive["rows"]:
+        better = next(f for f in r["files"] if f["rel"].startswith(TIDARR))
+        album = next(f for f in r["files"] if f["rel"].startswith(LIDARR))
+        assert better["upgrade"]["replace"] == album["rel"]
+        assert better["upgrade"]["to"] == album["rel"]  # same name, same extension
+        assert album["upgrade"] is None
+
+
+def test_tiny_folder_has_no_fit_line(halfalive):
+    tidarr = [f for r in halfalive["rows"] for f in r["files"] if f["rel"].startswith(TIDARR)]
+    assert all(f["fit"]["text"] == "" for f in tidarr)
+
+
+def test_partial_lossy_copy_is_suggested(loose):
+    c = loose["Partly"]
+    picks = sorted(f["name"] for r in c["rows"] for f in r["files"] if f["suggested"])
+    assert picks == ["02 Two.m4a", "03 Three.m4a"]
+
+
+def test_title_key(app_mod):
+    k = app_mod.title_key
+    assert k("Rest (with Samm Henshaw)") == k("Rest") == k("Rest [feat. X]") == k("Rest ft. X")
+    assert k("Rest (Live)") != k("Rest")
+    assert k("Featuring Song") == "featuring song"

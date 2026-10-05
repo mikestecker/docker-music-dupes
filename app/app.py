@@ -97,6 +97,16 @@ def norm(s):
     return re.sub(r"[^\w]+", " ", s).strip()
 
 
+# Featuring credits: "Rest (with Samm Henshaw)", "Song [feat. X]", "Song ft. X"
+FEAT_RE = re.compile(r"\s*[(\[]\s*(?:feat\.?|ft\.?|featuring|with)\s[^)\]]*[)\]]"
+                     r"|\s+(?:feat\.?|ft\.?|featuring)\s.*$", re.I)
+
+
+def title_key(title):
+    """Title for grouping: normalized, featuring credits removed."""
+    return norm(FEAT_RE.sub("", title or ""))
+
+
 def num(s):
     m = re.match(r"\s*(\d+)", s or "")
     return int(m.group(1)) if m else None
@@ -253,7 +263,7 @@ def tier(f):
 
 
 def group_key(f, mode):
-    title = norm(f["title"])
+    title = title_key(f["title"])
     if mode == "navidrome":
         return (f["nd_album"], f["disc"], f["track"], title)
     if mode == "same-folder":
@@ -359,36 +369,69 @@ def load_file(rel):
 
 # ---------- where a file came from ----------
 
+def lidarr_history(event_type):
+    """Every Lidarr history record of one event type, oldest first."""
+    out, page = [], 1
+    while page <= 200:
+        q = urllib.parse.urlencode({
+            "page": page, "pageSize": 1000, "eventType": event_type,
+            "sortKey": "date", "sortDirection": "ascending"})
+        req = urllib.request.Request(f"{LIDARR_URL}/api/v1/history?{q}",
+                                     headers={"X-Api-Key": LIDARR_KEY})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.load(r)
+        recs = data.get("records", [])
+        out.extend(recs)
+        if not recs or page * 1000 >= data.get("totalRecords", 0):
+            break
+        page += 1
+    return out
+
+
+def lidarr_rel(path):
+    if not path:
+        return None
+    rel = os.path.relpath(os.path.normpath(path), LIDARR_ROOT)
+    return None if rel.startswith("..") else rel
+
+
+def ci(d, key):
+    """Dict lookup ignoring key case: Lidarr's data keys are ImportedPath in
+    its database and importedPath in most API versions."""
+    key = key.lower()
+    return next((v for k, v in (d or {}).items() if k.lower() == key), None)
+
+
 def fetch_lidarr_sources():
-    """{rel: download client name} for every file Lidarr imported."""
+    """({rel: download client}, {rel: retag info}, warning) from Lidarr's history:
+    trackFileImported (3) says where a file came from, trackFileRetagged (9)
+    says Lidarr rewrote its tags, which also resets its modified date."""
     if not (LIDARR_URL and LIDARR_KEY):
-        return {}, None
-    out, page = {}, 1
+        return {}, {}, None
+    imports, retags = {}, {}
     try:
-        while page <= 200:
-            q = urllib.parse.urlencode({
-                "page": page, "pageSize": 1000, "eventType": 3,  # trackFileImported
-                "sortKey": "date", "sortDirection": "ascending"})
-            req = urllib.request.Request(f"{LIDARR_URL}/api/v1/history?{q}",
-                                         headers={"X-Api-Key": LIDARR_KEY})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                data = json.load(r)
-            recs = data.get("records", [])
-            for rec in recs:
-                d = rec.get("data") or {}
-                p = d.get("importedPath")
-                if not p:
-                    continue
-                rel = os.path.relpath(os.path.normpath(p), LIDARR_ROOT)
-                if not rel.startswith(".."):
-                    out[rel] = (d.get("downloadClientName") or d.get("downloadClient")
+        for rec in lidarr_history(3):
+            d = rec.get("data") or {}
+            rel = lidarr_rel(ci(d, "importedPath"))
+            if rel:
+                imports[rel] = (ci(d, "downloadClientName") or ci(d, "downloadClient")
                                 or "unknown client")
-            if not recs or page * 1000 >= data.get("totalRecords", 0):
-                break
-            page += 1
-        return out, None
+        for rec in lidarr_history(9):
+            rel = lidarr_rel(rec.get("sourceTitle"))
+            if not rel:
+                continue
+            d = rec.get("data") or {}
+            try:
+                fields = sorted({x.get("Field") or x.get("field") or ""
+                                 for x in json.loads(ci(d, "diff") or "[]")} - {""})
+            except (ValueError, TypeError, AttributeError):
+                fields = []
+            retags[rel] = {"date": rec.get("date", ""), "fields": fields,
+                           "scrubbed": str(ci(d, "tagsScrubbed")).lower() == "true"}
+        return imports, retags, None
     except Exception as e:
-        return out, f"Couldn't read Lidarr's history ({e}), so download sources are partial."
+        return imports, retags, (f"Couldn't read Lidarr's history ({e}), so download "
+                                 "sources are partial.")
 
 
 def detect_source(f, lidarr, rules):
@@ -410,6 +453,10 @@ def detect_source(f, lidarr, rules):
                 return r["label"], f"Your rule: {where} matches /{r['pattern']}/"
         except (KeyError, re.error, TypeError):
             continue
+    brands = tags.get("compatible_brands", "").lower()
+    if "dash" in brands or "cmfc" in brands:
+        return "Tidarr", ("Tidal stream container tags (compatible_brands="
+                          f"{tags['compatible_brands']}) that Tidarr leaves behind")
     if {"itunes account", "itunes owner", "purchase date"} & tags.keys():
         return "iTunes Store", "iTunes purchase tags (apID / ownr / purd)"
     if "tidal" in " ".join(tags.values()).lower():
@@ -510,7 +557,7 @@ def navidrome_groups():
         if rel in rels:  # overlapping libraries list one file twice
             continue
         rels.add(rel)
-        key = (s["album_id"], s["disc"] or 1, s["track"], norm(s["title"]))
+        key = (s["album_id"], s["disc"] or 1, s["track"], title_key(s["title"]))
         buckets[key].append((rel, s["album_id"]))
     if source == "api" and seen >= 20 and found < seen / 2:
         raise RuntimeError(
@@ -575,6 +622,10 @@ def row_evidence(g, single):
     else:
         add("warn", f"Length off by {spread:.1f}s" if spread < 60 else f"Length off by {fmt_len(spread)}",
             "Probably a different version, edit or recording.")
+    titles = {norm(f["title"]) for f in g}
+    if len(titles) > 1:
+        add("neutral", "Credits differ", "The titles differ only by a featured artist: "
+            + " vs ".join(sorted({f["title"] for f in g})) + ".")
     blocked = isrc_conflict or spread > LEN_TOL or damaged
     if identical:
         confirmed = "identical"
@@ -587,6 +638,7 @@ def row_evidence(g, single):
     else:
         confirmed = None
     return {"chips": chips, "identical": identical, "damaged": damaged,
+            "differs": bool(all(md5s) and same_fmt and not identical and not damaged),
             "isrc_conflict": isrc_conflict,
             "spread": spread, "blocked": blocked, "confirmed": confirmed,
             "has_isrc": all(isrcs)}
@@ -640,48 +692,64 @@ def ago(secs):
     return f"{n} {unit}{'' if n == 1 else 's'}"
 
 
+MIN_SIBS = 3  # fewer other tracks than this and naming/date patterns mean little
+
+
 def folder_fit(f, group, cache):
     """How well a copy fits the rest of its folder, as (score, tone, text).
 
     Three signals, the copies being compared left out: siblings named the same
     way, siblings written in the same download batch, and whether the file's
-    own track-number prefix agrees with its tags. Score runs from -1 (stray)
+    own track-number prefix agrees with its tags. Dates Lidarr reset by
+    retagging are left out of the batch signal. Folders with fewer than
+    MIN_SIBS other tracks only use the tag check. Score runs from -1 (stray)
     to 1 (fits perfectly), so it compares fairly across folders of any size."""
+    retagged = cache.get("retagged", set())
     skip = {x["rel"] for x in group}
     name = os.path.basename(f["rel"])
     shape = name_shape(name)
     sibs = [s for s in folder_files(f["folder"], cache) if s[0] not in skip]
     n = len(sibs)
     same_name = sum(s[1] == shape for s in sibs)
-    same_batch = sum(abs(s[2] - f["mtime"]) <= BATCH_SECS for s in sibs)
+    mine_retagged = f["rel"] in retagged
+    dated = [] if mine_retagged else [s for s in sibs if s[0] not in retagged]
+    nb = len(dated)
+    same_batch = sum(abs(s[2] - f["mtime"]) <= BATCH_SECS for s in dated)
     agrees = name_agrees(f)
-    score_ = ((same_name + same_batch) / (2 * n) if n else 0) - (agrees is False)
+    parts = []
+    if n >= MIN_SIBS:
+        parts.append(same_name / n)
+    if nb >= MIN_SIBS:
+        parts.append(same_batch / nb)
+    score_ = (sum(parts) / len(parts) if parts else 0) - (agrees is False)
 
     m = PREFIX_RE.match(os.path.splitext(name)[0])
     mine = f'"{(m.group(0).strip() + " ") if m else ""}Title"'
     pos = f"{f['disc']}-{f['track']}" if f["disc"] > 1 else f"track {f['track']}"
     odd = []
-    if n and same_batch * 2 < n:
-        median = sorted(s[2] for s in sibs)[n // 2]
+    if nb >= MIN_SIBS and same_batch * 2 < nb:
+        median = sorted(s[2] for s in dated)[nb // 2]
         when = "after" if f["mtime"] > median else "before"
         odd.append(f"added {ago(f['mtime'] - median)} {when} the rest of the folder")
     if agrees is False:
         odd.append(f"named {mine} though its tags say {pos}")
-    elif n and same_name * 2 < n:
+    elif n >= MIN_SIBS and same_name * 2 < n:
         common = Counter(s[1] for s in sibs).most_common(1)[0][0]
         other = next(s[0] for s in sibs if s[1] == common)
         mo = PREFIX_RE.match(os.path.splitext(os.path.basename(other))[0])
         theirs = f'"{(mo.group(0).strip() + " ") if mo else ""}Title"'
         odd.append(f"named {mine} while the rest use {theirs}")
+    note = ". Its date is ignored because Lidarr rewrote its tags" if mine_retagged and n >= MIN_SIBS else ""
     if odd:
         text = ", ".join(odd)
-        return score_, "warn", text[0].upper() + text[1:]
-    if n and same_name == n and same_batch == n:
-        return score_, "good", "Named and added like the rest of the folder"
-    if n:
-        return score_, "", (f"Named like {same_name} and added with {same_batch} "
-                            f"of the {n} other tracks in the folder")
-    return score_, "", ""
+        return score_, "warn", text[0].upper() + text[1:] + note
+    if n < MIN_SIBS:
+        return score_, "", ""
+    if same_name == n and (same_batch == nb or not nb):
+        return score_, "good", ("Named like the rest of the folder" if not nb or mine_retagged
+                                else "Named and added like the rest of the folder") + note
+    return score_, "", (f"Named like {same_name} of the {n} other tracks in the folder"
+                        + (f", added with {same_batch}" if nb >= MIN_SIBS else "") + note)
 
 
 def folder_summary(folder, cache):
@@ -694,7 +762,9 @@ def folder_summary(folder, cache):
         if loaded:
             counts = Counter((label(x), tier(x)) for x in loaded)
             ((fmt, det), tr), cnt = counts.most_common(1)[0]
-            added = sorted(s[2] for s in files)[len(files) // 2]
+            retagged = cache.get("retagged", set())
+            dates = sorted(s[2] for s in files if s[0] not in retagged) or sorted(s[2] for s in files)
+            added = dates[len(dates) // 2]
             cache[key] = {"format": fmt, "detail": det, "tier": tr,
                           "format_count": cnt, "added": added}
         else:
@@ -725,7 +795,51 @@ def file_props(f):
         "Cover art": "Embedded" if f["art"] else "None",
         "File size": f"{f['size']:,} bytes",
         "Modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(f["mtime"])),
+        "Tags rewritten by Lidarr": retag_text(f.get("retag")),
     }
+
+
+def retag_text(r):
+    if not r:
+        return ""
+    what = ", ".join(r["fields"][:8]) + (" and more" if len(r["fields"]) > 8 else "")
+    out = r["date"][:10]
+    if what:
+        out += f", changed {what}"
+    if r["scrubbed"]:
+        out += ", removed other tags"
+    return out
+
+
+def upgrades(g, ev, fits, album_folder):
+    """{better copy's rel: what it can replace}. A better copy that sits outside
+    the album (a partial folder, or a stray in the album's own folder) can take
+    the place of the album's lower-quality copy: same name, its own extension.
+    Only for the same take (lengths within 1s, nothing contradicting)."""
+    if ev["spread"] > 1.0 or ev["isrc_conflict"] or ev["damaged"] or ev["differs"]:
+        return {}
+    out = {}
+    for p in g:
+        for k in g:
+            if k is p or qclass(p) <= qclass(k):
+                continue
+            if album_folder:
+                belongs = k["folder"] == album_folder and p["folder"] != album_folder
+            else:
+                belongs = (k["folder"] == p["folder"]
+                           and fits[k["rel"]][0] > fits[p["rel"]][0] + 0.5)
+            if not belongs:
+                continue
+            stem = os.path.splitext(os.path.basename(k["rel"]))[0]
+            dst = os.path.join(k["folder"], stem + os.path.splitext(p["rel"])[1].lower())
+            if dst != k["rel"] and os.path.lexists(os.path.join(MUSIC, dst)):
+                continue
+            fmt, det = label(k)
+            out[p["rel"]] = {"replace": k["rel"], "to": dst, "replaces": f"{fmt} {det}",
+                             "folder": os.path.basename(k["folder"]),
+                             "name": os.path.basename(dst)}
+            break
+    return out
 
 
 def build_cluster(folders, rows, ignored, folder_cache):
@@ -762,6 +876,7 @@ def build_cluster(folders, rows, ignored, folder_cache):
     # Pre-select per row: keep the best copy in the keeper folder; everything
     # else in the row goes only if it isn't better than what we keep.
     picks = []
+    album_folder = keeper if reason == "Complete album covers a partial copy" else None
     if keeper is not None:
         for g in rows:
             mine = [f for f in g if f["folder"] == keeper]
@@ -769,9 +884,19 @@ def build_cluster(folders, rows, ignored, folder_cache):
             others = [f for f in g if f is not keep]
             if any(qclass(f) > qclass(keep) for f in others):
                 kind, keeper, picks = "manual", None, []
-                reason = "Better quality in the edition we'd remove"
-                detail = ("The edition that looks like the keeper has lower-quality "
-                          "copies of some tracks. Pick per track.")
+                if album_folder:
+                    better = sum(any(qclass(f) > qclass(max((x for x in r if x["folder"] == album_folder),
+                                                             key=qclass))
+                                     for f in r if f["folder"] != album_folder) for r in rows)
+                    reason = "Better copies in a partial folder"
+                    detail = (f"The complete album has lower-quality copies of {better} of "
+                              f"{len(rows)} tracks than the partial folder. Use Replace the "
+                              "album's copy on the better file to move it into the album, "
+                              "or pick per track.")
+                else:
+                    reason = "Better quality in the edition we'd remove"
+                    detail = ("The edition that looks like the keeper has lower-quality "
+                              "copies of some tracks. Pick per track.")
                 break
             picks.extend(f["rel"] for f in others)
     if keeper is not None:
@@ -790,6 +915,7 @@ def build_cluster(folders, rows, ignored, folder_cache):
         # The copy "Select all removable" keeps: the keeper's, else the app's pick.
         pool = [f for f in g if f["folder"] == keeper] or g
         pref = max(pool, key=lambda f: keep_rank(f, fits[f["rel"]][0]))["rel"]
+        ups = upgrades(g, ev, fits, album_folder)
         files = []
         for f in sorted(g, key=lambda f: (folders.index(f["folder"]), -score(f)[1])):
             fmt, det = label(f)
@@ -803,6 +929,7 @@ def build_cluster(folders, rows, ignored, folder_cache):
                 "stray": fits[f["rel"]][0] < top_fit[f["folder"]] - 0.5,
                 "fit": {"tone": fits[f["rel"]][1], "text": fits[f["rel"]][2]},
                 "keep_pref": f["rel"] == pref,
+                "upgrade": ups.get(f["rel"]),
                 "suggested": f["rel"] in picks, "moved": False,
                 "props": file_props(f), "tags": f["tags"],
             })
@@ -814,6 +941,28 @@ def build_cluster(folders, rows, ignored, folder_cache):
     return {"key": key, "kind": kind, "reason": reason, "detail": detail,
             "ignored": key in ignored, "editions": eds, "rows": out_rows,
             "artist": eds[0]["artist"], "album": eds[0]["album"]}
+
+
+def partial_copy(eds, rows, evs):
+    """(complete edition, [partial editions]) when every other edition is a
+    folder whose audio files are all duplicated in one more complete edition of
+    the same album, else None. A stray partial download (Tidarr grabbing a few
+    tracks Lidarr already has) shouldn't need a decision per track."""
+    if len(eds) < 2 or len({norm(e["album"]) for e in eds}) > 1:
+        return None
+    in_rows = Counter(f["folder"] for g in rows for f in g)
+    whole = max(eds, key=lambda e: e["tracks"])
+    parts = [e for e in eds if e is not whole]
+    if not all(e["tracks"] and in_rows[e["folder"]] >= e["tracks"] and e["tracks"] < whole["tracks"]
+               for e in parts):
+        return None
+    for g, ev in zip(rows, evs):
+        if not any(f["folder"] == whole["folder"] for f in g):
+            return None
+        # same take, and never audio we can prove is different
+        if ev["spread"] > 1.0 or ev["isrc_conflict"] or ev["damaged"] or ev["differs"]:
+            return None
+    return whole, parts
 
 
 def classify(eds, rows, evs, single):
@@ -846,6 +995,15 @@ def classify(eds, rows, evs, single):
                     "the rest of the folder.", eds[0]["folder"])
         return ("manual", "Couldn't confirm duplicates",
                 "Same folder, but the lengths or recordings don't line up.", None)
+
+    partial = partial_copy(eds, rows, evs)
+    if partial:
+        whole, parts = partial
+        names = ", ".join(os.path.basename(e["folder"]) for e in parts)
+        return ("suggested", "Complete album covers a partial copy",
+                f"{names} only holds tracks that are all in {whole['album']} "
+                f"({whole['tracks']} tracks), with matching lengths. Keeping the complete "
+                "album; the partial copies are selected.", whole["folder"])
 
     deluxe = [e for e in eds if e["deluxe"]]
     if deluxe and len(deluxe) < len(eds):
@@ -907,7 +1065,7 @@ def run_scan(mode):
     try:
         warnings = []
         update(phase="Reading Lidarr history" if LIDARR_URL else "Listing files")
-        lidarr, warn = fetch_lidarr_sources()
+        lidarr, retags, warn = fetch_lidarr_sources()
         if warn:
             warnings.append(warn)
         rules = load_json(SOURCES, {}).get("rules", [])
@@ -960,11 +1118,12 @@ def run_scan(mode):
         for g in groups:
             for f in g:
                 f["source"], f["source_why"] = detect_source(f, lidarr, rules)
+                f["retag"] = retags.get(f["rel"])
         by_folders = defaultdict(list)
         for g in groups:
             by_folders[tuple(sorted({f["folder"] for f in g}))].append(g)
         ignored = set(load_json(IGNORED, []))
-        counts = {}
+        counts = {"retagged": set(retags)}
         clusters = [build_cluster(list(folders), rows, ignored, counts)
                     for folders, rows in by_folders.items()]
         clusters.sort(key=lambda c: (c["artist"].casefold(), c["album"].casefold()))
@@ -1037,7 +1196,7 @@ if not os.path.exists(SOURCES):
                   "as shown in the app's tag table (lowercase), 'path' to match the "
                   "file path, or leave it out to search every tag. 'pattern' is a "
                   "case-insensitive regex."),
-        "_example": {"label": "Tidarr", "tag": "comment", "pattern": "tidal"},
+        "_example": {"label": "Bandcamp", "tag": "path", "pattern": "^Bandcamp/"},
         "rules": []})
 CACHE = TagCache(os.path.join(CONFIG, "tags.db"))
 
@@ -1092,6 +1251,10 @@ class ScanReq(BaseModel):
 
 class PathsReq(BaseModel):
     paths: list[str]
+
+
+class UpgradeReq(BaseModel):
+    rel: str
 
 
 class BatchReq(BaseModel):
@@ -1242,6 +1405,57 @@ def quarantine(req: PathsReq):
             "bytes": sum(f["size"] for f in moved), "errors": errors}
 
 
+@app.post("/api/upgrade")
+def upgrade(req: UpgradeReq):
+    """Move a better copy into the album in place of its lower-quality copy.
+    The replaced copy goes to quarantine and the batch records the move, so
+    Restore puts both files back where they were."""
+    with MLOCK:
+        with LOCK:
+            if STATE["status"] != "done":
+                raise HTTPException(409, "Run a scan first.")
+            hit = next(((r, f) for c in STATE["clusters"] for r in c["rows"]
+                        for f in r["files"] if f["rel"] == req.rel), None)
+        if not hit or hit[1]["moved"] or not hit[1].get("upgrade"):
+            raise HTTPException(400, "That copy can't replace anything. Scan again.")
+        row, p = hit
+        up = p["upgrade"]
+        k = next((f for f in row["files"] if f["rel"] == up["replace"] and not f["moved"]), None)
+        if k is None or not unchanged(p) or not unchanged(k):
+            raise HTTPException(409, "These files changed since the scan. Scan again.")
+        try:
+            src, dst = library_path(p["rel"]), library_path(up["to"])
+        except ValueError:
+            raise HTTPException(400, "That path is outside the library.")
+        if up["to"] != k["rel"] and os.path.lexists(dst):
+            raise HTTPException(409, f"{up['to']} already exists.")
+
+        m = load_manifest()
+        batch = new_batch_id(m)
+        m[batch] = {"created": time.time(),
+                    "files": [{"rel": k["rel"], "size": k["size"],
+                               "quality": f"{k['format']} {k['detail']}"}],
+                    "moves": [{"from": p["rel"], "to": up["to"], "size": p["size"],
+                               "quality": f"{p['format']} {p['detail']}"}]}
+        save_json(MANIFEST, m)
+        try:
+            move(library_path(k["rel"]), os.path.join(QDIR, batch, k["rel"]))
+        except Exception as e:
+            del m[batch]
+            save_json(MANIFEST, m)
+            raise HTTPException(500, f"Couldn't quarantine {k['rel']}: {e}")
+        try:
+            move(src, dst)
+        except Exception as e:  # put the album's copy back; nothing changed
+            move(os.path.join(QDIR, batch, k["rel"]), library_path(k["rel"]))
+            prune_empty(os.path.join(QDIR, batch))
+            del m[batch]
+            save_json(MANIFEST, m)
+            raise HTTPException(500, f"Couldn't move {p['rel']}: {e}")
+        k["moved"] = p["moved"] = True
+    return {"batch": batch, "replaced": k["rel"], "now": up["to"]}
+
+
 @app.get("/api/quarantine")
 def list_quarantine():
     with MLOCK:
@@ -1252,6 +1466,7 @@ def list_quarantine():
                  if os.path.exists(os.path.join(QDIR, bid, f["rel"]))]
         if files:
             out.append({"batch": bid, "created": m[bid]["created"], "files": files,
+                        "moves": m[bid].get("moves", []),
                         "bytes": sum(f["size"] for f in files)})
     return out
 
@@ -1268,6 +1483,17 @@ def restore(req: BatchReq):
         m = load_manifest()
         b = get_batch(m, req.batch)
         restored, remaining, errors, back = 0, [], [], set()
+        moves_left = []
+        for mv in b.get("moves", []):  # an upgrade: move the better copy back first
+            try:
+                here, home = library_path(mv["to"]), library_path(mv["from"])
+                if not os.path.lexists(here) or os.path.getsize(here) != mv["size"]:
+                    raise FileNotFoundError(errno.ENOENT, "it isn't the file we moved anymore")
+                move(here, home)
+                back.add(mv["from"])
+            except Exception as e:
+                errors.append(f"{mv['to']}: couldn't move it back to {mv['from']} ({e}).")
+                moves_left.append(mv)
         for f in b["files"]:
             src = os.path.join(QDIR, req.batch, f["rel"])
             if not os.path.lexists(src):
@@ -1285,6 +1511,10 @@ def restore(req: BatchReq):
             back.add(f["rel"])
             restored += 1
         bdir = os.path.join(QDIR, req.batch)
+        if moves_left:
+            b["moves"] = moves_left
+        else:
+            b.pop("moves", None)
         if remaining:
             b["files"] = remaining
             prune_empty(bdir)

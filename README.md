@@ -242,12 +242,12 @@ Set `LIDARR_URL`, `LIDARR_API_KEY` and `LIDARR_MUSIC_ROOT`, and each file gets l
 
 ### Your own source rules
 
-For files Lidarr didn't import (Tidarr downloads, manual rips, store purchases), add rules to `/config/sources.json`. Rules run top to bottom, first match wins:
+For files Lidarr didn't import and the built-in labels don't catch (manual rips, store purchases, a folder you keep for one source), add rules to `/config/sources.json`. Rules run top to bottom, first match wins:
 
 ```json
 {
   "rules": [
-    {"label": "Tidarr", "tag": "comment", "pattern": "tidal"},
+    {"label": "Qobuz", "tag": "comment", "pattern": "qobuz"},
     {"label": "Bandcamp", "tag": "path", "pattern": "^Bandcamp/"},
     {"label": "Old CD rips", "tag": "encoder", "pattern": "^EAC"}
   ]
@@ -259,7 +259,12 @@ For files Lidarr didn't import (Tidarr downloads, manual rips, store purchases),
 
 Easiest way to write one: open **Compare tags** on a file from that source, find a tag that's always set the same way, and match on it. Rules are read at the start of each scan, so no restart needed.
 
-Built-in labels cover iTunes Store purchases, anything with "tidal" in a tag, and MusicBrainz-tagged files.
+Built-in labels cover:
+
+- **Tidarr**: Tidarr repackages Tidal's stream with ffmpeg, which leaves container tags behind (`compatible_brands=mp41dashcmfc`, `major_brand=iso8`). Nothing else in a typical pipeline writes those. If Lidarr later rewrites a file's tags, they're gone, so turn off Lidarr's tag writing if you want to keep that trail (and the ISRCs Tidarr writes).
+- iTunes Store purchases, anything else with "tidal" in a tag, and MusicBrainz-tagged files.
+
+With Lidarr connected, the app also reads Lidarr's **retag** history. A retag resets a file's modified date, so for those files the date isn't used to judge which download a copy came from, and the tag table shows what Lidarr changed.
 
 ---
 
@@ -298,11 +303,14 @@ Then, per album pair:
 
 - Different album artists → Review.
 - Any track with different ISRCs, or lengths more than 2.5s apart → Review.
+- One folder only holds tracks that are all in a more complete copy of the same album (say Tidarr grabbed three songs Lidarr already has) → suggest keeping the complete album. Every track must be within a second, and audio that's provably different is never covered.
 - One edition is deluxe/expanded/special and the other isn't → suggest keeping the deluxe one.
 - Every track proven identical or the same recording → suggest keeping the best quality, then the most complete, best-tagged edition.
 - Anything else → Review.
 
-Last check: if the edition it would keep has a lower-quality copy of any track than the one it would remove (say a CD-quality deluxe vs a hi-res standard), the whole album gets bumped to Review.
+Last check: if the edition it would keep has a lower-quality copy of any track than the one it would remove (say a CD-quality deluxe vs a hi-res standard), the whole album gets bumped to Review. When that's a partial folder holding hi-res copies of a CD-quality album, the reason says so, and the better file gets a **Replace the album's copy** button: it moves into the album under the album copy's name and the lower-quality copy goes to quarantine. Restore (or Undo) puts both back.
+
+Titles that differ only by a featured artist (`Rest` vs `Rest (with Samm Henshaw)`, `feat.`, `ft.`) count as the same track, with a "Credits differ" note.
 
 Within a folder, ties on quality go to the copy that fits in: named like the other tracks (`01-03 Title` vs `03 Title`), written in the same download batch, and with a filename that agrees with its own track tags. Each copy shows a line saying how it fits, and a later stray re-download gets marked "Doesn't match the folder". 44.1 kHz and 48 kHz at the same bit depth count as the same quality, so a stray at 48 kHz doesn't outrank the album's 44.1 kHz copy.
 
