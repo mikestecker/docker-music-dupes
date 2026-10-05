@@ -840,6 +840,18 @@ def upgrades(g, ev, fits, album_folder):
     return out
 
 
+def track_total(f):
+    """The album's track count as a copy states it: TOTALTRACKS/TRACKTOTAL, or
+    the "/9" in a "3/9" track number. None when the copy doesn't say."""
+    t = f["tags"]
+    for k in ("totaltracks", "tracktotal"):
+        n = num(t.get(k))
+        if n:
+            return n
+    m = re.match(r"\s*\d+\s*/\s*(\d+)", t.get("tracknumber") or t.get("track") or "")
+    return int(m.group(1)) if m else None
+
+
 def build_cluster(folders, rows, ignored, folder_cache):
     rows.sort(key=lambda g: (min(f["disc"] for f in g),
                              min(f["track"] or 999 for f in g), norm(g[0]["title"])))
@@ -864,8 +876,17 @@ def build_cluster(folders, rows, ignored, folder_cache):
             "source": Counter(f["source"] for f in fs).most_common(1)[0][0],
             "added": summ["added"],
             "tag_count": round(mean(len(f["tags"]) for f in fs), 1),
+            # share of copies whose tags Lidarr didn't rewrite
+            "untouched": round(mean(not f.get("retag") for f in fs), 2),
+            "total": max((t for t in map(track_total, fs) if t), default=None),
             "keep": False,
         })
+    # The album's size: an edition's own total, else (for editions of one
+    # album) the largest total any edition states.
+    one_album = all(same_album(a["album"], b["album"]) for i, a in enumerate(eds) for b in eds[i + 1:])
+    known = max((e["total"] for e in eds if e["total"]), default=None)
+    for e in eds:
+        e["album_total"] = e["total"] or (known if one_album else None)
     evs = [row_evidence(g, single) for g in rows]
     kind, reason, detail, keeper = classify(eds, rows, evs, single)
 
@@ -963,7 +984,8 @@ def partial_copy(eds, rows, evs):
     folder whose audio files are all duplicated in one more complete edition of
     the same album, else None. A stray partial download (Tidarr grabbing a few
     tracks Lidarr already has) shouldn't need a decision per track."""
-    if len(eds) < 2 or len({album_key(e["album"]) for e in eds}) > 1:
+    if len(eds) < 2 or not all(same_album(a["album"], b["album"])
+                               for i, a in enumerate(eds) for b in eds[i + 1:]):
         return None
     in_rows = Counter(f["folder"] for g in rows for f in g)
     whole = max(eds, key=lambda e: e["tracks"])
@@ -1031,9 +1053,14 @@ def classify(eds, rows, evs, single):
         whole, parts = partial
         names = ", ".join(os.path.basename(e["folder"]) for e in parts)
         n = sum(e["tracks"] for e in parts)
-        lead = (f"{names} would normally win as the bigger edition, but only "
-                f"{n} of its tracks {'is' if n == 1 else 'are'} here"
-                if any(e["deluxe"] for e in parts) else f"{names} only holds tracks")
+        total = max((e["album_total"] or 0 for e in parts), default=0)
+        if any(e["deluxe"] for e in parts):
+            lead = (f"{names} would normally win as the bigger edition, but only "
+                    f"{n} of its tracks {'is' if n == 1 else 'are'} here")
+        elif total > n:
+            lead = f"{names} holds {n} of the album's {total} tracks"
+        else:
+            lead = f"{names} only holds tracks"
         return ("suggested", "Complete album covers a partial copy",
                 f"{lead}, all also in {whole['album']} ({whole['tracks']} tracks) with "
                 "matching lengths. Keeping the complete album; the partial copies are "
@@ -1047,7 +1074,8 @@ def classify(eds, rows, evs, single):
             for folder in {f["folder"] for f in g if qclass(f) == top}:
                 best_count[folder] += 1
         keeper = max(eds, key=lambda e: (best_count[e["folder"]], e["tracks"],
-                                         source_rank(e["source"]), e["tag_count"],
+                                         source_rank(e["source"]), e["untouched"],
+                                         e["tag_count"],
                                          -int(e["year"] or 9999)))
         ident = all(e["identical"] for e in evs)
         reason = "Identical audio" if ident else "Same recordings"
@@ -1058,8 +1086,8 @@ def classify(eds, rows, evs, single):
             why += f" Release years differ ({', '.join(sorted(years))}), but it's the same audio, not a re-recording."
         return ("suggested", reason,
                 f"{why} Keeping the edition with the best quality, then the most "
-                "tracks, then a preferred source, then the richest tags, then the earliest "
-                "year.", keeper["folder"])
+                "tracks, then a preferred source, then tags Lidarr didn't rewrite, then the "
+                "richest tags, then the earliest year.", keeper["folder"])
 
     missing = sum(not e["has_isrc"] and not e["identical"] for e in evs)
     return ("manual", "Couldn't confirm same recordings",
