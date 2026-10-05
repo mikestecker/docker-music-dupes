@@ -119,6 +119,7 @@
   .f-fit.good { color: var(--keep); }
   .f-fit.warn { color: var(--warn); }
   .upgrade { margin-top: 6px; }
+  .f-why { font-size: 12px; color: var(--keep); margin-top: 2px; font-weight: 600; }
   .file.is-selected .f-name { text-decoration: line-through; color: var(--muted); }
   .file.is-selected .q { opacity: .5; }
   .src { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -541,6 +542,7 @@ function fileHtml(f, other) {
       </div>
       <div class="f-name">${diffHtml(f.name, other && other.name)}</div>
       ${f.fit && f.fit.text ? `<div class="f-fit ${esc(f.fit.tone)}">${esc(f.fit.text)}</div>` : ""}
+      ${f.keep_why && !f.suggested ? `<div class="f-why">Kept: ${esc(f.keep_why)}</div>` : ""}
       <div class="f-meta"><span class="src" title="${esc(f.source_why)}">${esc(f.source)}</span><span>Added ${fmtDate(f.mtime)}</span></div>
       ${f.upgrade ? `<button class="btn small upgrade" data-upgrade="${esc(f.rel)}"
         title="Moves this file into ${esc(f.upgrade.folder)} as ${esc(f.upgrade.name)} and quarantines the ${esc(f.upgrade.replaces)} copy that's there now. Undo puts both back.">Replace the album's ${esc(f.upgrade.replaces)} copy</button>` : ""}

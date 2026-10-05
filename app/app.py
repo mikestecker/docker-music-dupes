@@ -65,6 +65,12 @@ ALLOWED_HOSTS = {h.strip().lower().rstrip(".") for h in
 LAN_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
                 ".localdomain", ".localhost")
 
+# Sources to prefer when copies are otherwise equal, best first, matched
+# case-insensitively against the source label ("Tidarr", "Tidarr (SABnzbd) via
+# Lidarr", a sources.json label). Empty turns it off.
+PREFER_SOURCES = [x.strip().lower() for x in
+                  os.environ.get("PREFER_SOURCES", "Tidarr").split(",") if x.strip()]
+
 AUDIO_EXT = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".aac",
              ".wav", ".aiff", ".aif", ".wma"}
 LOSSLESS_EXT = {"flac", "wav", "aiff", "aif"}
@@ -704,11 +710,61 @@ def folder_summary(folder, cache):
     return cache[key]
 
 
-def keep_rank(f, fit=0):
-    """Better quality class, fits its folder (naming, download batch, name
-    agrees with tags), then the finer quality, no ' (1)' suffix, more tags, older."""
+def source_rank(label):
+    """Higher for sources earlier in PREFER_SOURCES, 0 for the rest."""
+    label = (label or "").lower()
+    for i, pref in enumerate(PREFER_SOURCES):
+        if pref in label:
+            return len(PREFER_SOURCES) - i
+    return 0
+
+
+def name_matches_title(f):
+    """Does the filename (minus its track number) say the same as the title
+    tag? Characters filesystems can't hold may be replaced but not dropped:
+    "Queen Songs + human" matches "Queen Songs / human.", "Queen SongsHuman"
+    doesn't. None when there's no title to compare."""
+    if not f["title"]:
+        return None
     stem = os.path.splitext(os.path.basename(f["rel"]))[0]
-    return (qclass(f), fit, score(f), not COPY_RE.search(stem), len(f["tags"]), -f["mtime"])
+    return norm(PREFIX_RE.sub("", stem, count=1)) == norm(f["title"])
+
+
+def keep_rank(f, fit=0):
+    """Which copy to keep, best first. Quality class and fit with the folder
+    come first; then metadata: a filename that matches the title, an ISRC, a
+    preferred source, tags Lidarr didn't rewrite; then the finer quality, no
+    ' (1)' suffix, more tags, older. KEEP_REASONS names each position."""
+    stem = os.path.splitext(os.path.basename(f["rel"]))[0]
+    return (qclass(f), fit, name_matches_title(f) is True, bool(f["isrc"]),
+            source_rank(f.get("source")), not f.get("retag"), score(f),
+            not COPY_RE.search(stem), len(f["tags"]), -f["mtime"])
+
+
+KEEP_REASONS = [
+    lambda f, o: "better quality",
+    lambda f, o: "fits the rest of the folder",
+    lambda f, o: "filename matches its title",
+    lambda f, o: "has an ISRC",
+    lambda f, o: f"from {f['source']}, a preferred source",
+    lambda f, o: "tags not rewritten by Lidarr",
+    lambda f, o: f"{label(f)[1]} instead of {label(o)[1]}",
+    lambda f, o: "no (1) in the name",
+    lambda f, o: "more complete tags",
+    lambda f, o: "older file",
+]
+
+
+def keep_why(keep, others, fits):
+    """The first ranking step that put the kept copy ahead of the runner-up."""
+    if not others:
+        return ""
+    rank = lambda f: keep_rank(f, fits[f["rel"]][0])
+    runner = max(others, key=rank)
+    for i, (a, b) in enumerate(zip(rank(keep), rank(runner))):
+        if a != b:
+            return KEEP_REASONS[i](keep, runner)
+    return ""
 
 
 def file_props(f):
@@ -807,13 +863,14 @@ def build_cluster(folders, rows, ignored, folder_cache):
 
     # Pre-select per row: keep the best copy in the keeper folder; everything
     # else in the row goes only if it isn't better than what we keep.
-    picks = []
+    picks, whys = [], {}
     album_folder = keeper if reason == "Complete album covers a partial copy" else None
     if keeper is not None:
         for g in rows:
             mine = [f for f in g if f["folder"] == keeper]
             keep = max(mine, key=lambda f: keep_rank(f, fits[f["rel"]][0]))
             others = [f for f in g if f is not keep]
+            whys[keep["rel"]] = keep_why(keep, [f for f in mine if f is not keep], fits)
             if any(qclass(f) > qclass(keep) for f in others):
                 kind, keeper, picks = "manual", None, []
                 if album_folder:
@@ -861,6 +918,7 @@ def build_cluster(folders, rows, ignored, folder_cache):
                 "stray": fits[f["rel"]][0] < top_fit[f["folder"]] - 0.5,
                 "fit": {"tone": fits[f["rel"]][1], "text": fits[f["rel"]][2]},
                 "keep_pref": f["rel"] == pref,
+                "keep_why": whys.get(f["rel"], "") if keeper is not None else "",
                 "upgrade": ups.get(f["rel"]),
                 "suggested": f["rel"] in picks, "moved": False,
                 "props": file_props(f), "tags": f["tags"],
@@ -923,8 +981,8 @@ def classify(eds, rows, evs, single):
         if all(e["confirmed"] for e in evs):
             return ("suggested", "Duplicate files in one folder",
                     "Same track slot in the same album folder with matching length. "
-                    "The best copy stays; on equal quality, the one named and dated like "
-                    "the rest of the folder.", eds[0]["folder"])
+                    "The best copy stays: quality first, then the one that fits the folder "
+                    "and has the best metadata. Each kept copy says why.", eds[0]["folder"])
         return ("manual", "Couldn't confirm duplicates",
                 "Same folder, but the lengths or recordings don't line up.", None)
 
@@ -951,7 +1009,8 @@ def classify(eds, rows, evs, single):
             for folder in {f["folder"] for f in g if qclass(f) == top}:
                 best_count[folder] += 1
         keeper = max(eds, key=lambda e: (best_count[e["folder"]], e["tracks"],
-                                         e["tag_count"], -int(e["year"] or 9999)))
+                                         source_rank(e["source"]), e["tag_count"],
+                                         -int(e["year"] or 9999)))
         ident = all(e["identical"] for e in evs)
         reason = "Identical audio" if ident else "Same recordings"
         why = ("Every track's decoded audio is bit-for-bit identical."
@@ -961,7 +1020,8 @@ def classify(eds, rows, evs, single):
             why += f" Release years differ ({', '.join(sorted(years))}), but it's the same audio, not a re-recording."
         return ("suggested", reason,
                 f"{why} Keeping the edition with the best quality, then the most "
-                "tracks, then the richest tags, then the earliest year.", keeper["folder"])
+                "tracks, then a preferred source, then the richest tags, then the earliest "
+                "year.", keeper["folder"])
 
     missing = sum(not e["has_isrc"] and not e["identical"] for e in evs)
     return ("manual", "Couldn't confirm same recordings",

@@ -17,6 +17,7 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
+      - PREFER_SOURCES=${PREFER_SOURCES:-Tidarr}
       - LIDARR_URL=${LIDARR_URL:-}
       - LIDARR_API_KEY=${LIDARR_API_KEY:-}
       - LIDARR_MUSIC_ROOT=${LIDARR_MUSIC_ROOT:-/data/media/music}
