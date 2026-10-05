@@ -1,4 +1,4 @@
-"""HTTP API behaviour and the safety invariants in docs/HANDOFF.md section 5."""
+"""HTTP API behaviour and the safety invariants listed in CLAUDE.md."""
 import os
 
 import pytest
@@ -8,7 +8,7 @@ def test_health_and_info(client, lib):
     assert client.get("/healthz").json() == {"ok": True}
     info = client.get("/api/info").json()
     assert info["music"] == os.path.realpath(lib[0])
-    assert info["navidrome"] is None and info["lidarr"] is False
+    assert "navidrome" not in info and info["lidarr"] is False
 
 
 def test_index_served(client):
@@ -16,9 +16,12 @@ def test_index_served(client):
     assert r.status_code == 200 and "<html" in r.text
 
 
-def test_bad_mode_and_unconfigured_navidrome(client):
-    assert client.post("/api/scan", json={"mode": "nope"}).status_code == 400
-    assert client.post("/api/scan", json={"mode": "navidrome"}).status_code == 400
+def test_old_mode_field_is_ignored(client):
+    import time
+    assert client.post("/api/scan", json={"mode": "navidrome"}).status_code == 200
+    while client.get("/api/scan").json()["status"] == "scanning":
+        time.sleep(0.05)
+    assert client.get("/api/scan").json()["status"] == "done"
 
 
 def test_audio_range_and_containment(client, scan):
@@ -154,3 +157,19 @@ def test_cross_site_post_rejected(client):
     r = client.post("/api/keep-both", json={"key": "x", "kept": False},
                     headers={"Sec-Fetch-Site": "same-origin"})
     assert r.status_code == 200
+
+
+def test_leftover_navidrome_settings_warn(tmp_path):
+    import subprocess
+    import sys
+    app_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NAVIDROME_")}
+    env.update(MUSIC_DIR=str(tmp_path / "m"), CONFIG_DIR=str(tmp_path / "c"),
+               NAVIDROME_URL="http://nas:4533", NAVIDROME_PASSWORD="x")
+    (tmp_path / "m").mkdir()
+    code = "import app; print('W=' + app.ND_WARNING)"
+    r = subprocess.run([sys.executable, "-c", code], cwd=app_dir, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "music-dupes: NAVIDROME_URL, NAVIDROME_PASSWORD are no longer used" in r.stdout
+    assert "W=NAVIDROME_URL, NAVIDROME_PASSWORD are no longer used" in r.stdout

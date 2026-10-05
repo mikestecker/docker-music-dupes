@@ -19,7 +19,7 @@ services:
       - PYTHONPATH=/tmp/deps
       - MUSIC_DIR=/music
       - CONFIG_DIR=/config
-      # Same optional NAVIDROME_* / LIDARR_* variables as the main compose file.
+      # Same optional LIDARR_* variables as the main compose file.
     command: >
       sh -c "pip install --quiet --no-cache-dir --disable-pip-version-check
       --target /tmp/deps fastapi==0.115.6 uvicorn==0.34.0 mutagen==1.47.0

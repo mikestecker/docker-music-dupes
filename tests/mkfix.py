@@ -1,5 +1,6 @@
 """Build the fixture library: short sine-wave files with exact tags covering
-every duplicate pattern in docs/HANDOFF.md section 1. Needs ffmpeg.
+every duplicate pattern the app handles (see EXPECTED in tests/test_classify.py).
+Needs ffmpeg.
 
 Identical frequency + duration produces identical FLAC MD5s, which is how the
 "identical audio" cases are made.
@@ -110,6 +111,17 @@ def build(root):
     for freq, t, title in [(1701, 2, "Two"), (1702, 3, "Three")]:
         mk(freq, AAC, 5, f"Partly/Album (2018) (1)/{t:02d} {title}.m4a", title,
            "Partly", "Partly", "Album", "2018", t)
+    # Untagged rips: only the folder + filename key can pair them.
+    for name in ("Song.flac", "Song (1).flac"):
+        p = os.path.join(root, "Untagged/Rips", name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=1800:d=5",
+                        "-c:a", "flac", "-map_metadata", "-1", p], check=True)
+    # Same album slot, different track credits: only the album key pairs them.
+    mk(1900, FL, 5, "Credits/Album (2021)/03 Song.flac", "Song", "Credits, Guest", "Credits",
+       "Album", "2021", 3)
+    mk(1900, FL, 5, "Credits/Album (2021) (Tidal)/03 Song.flac", "Song", "Credits", "Credits",
+       "Album", "2021", 3)
 
 
 if __name__ == "__main__":

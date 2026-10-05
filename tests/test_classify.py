@@ -1,4 +1,4 @@
-"""Expected classification for the fixture library (docs/HANDOFF.md 10.1)."""
+"""Expected classification for the fixture library built by tests/mkfix.py."""
 import os
 
 import pytest
@@ -20,12 +20,14 @@ EXPECTED = {
     "Mixtape": ("suggested", "Duplicate files in one folder", None),
     "Half\u00b7Alive": ("manual", "Better copies in a partial folder", None),
     "Partly": ("suggested", "Complete album covers a partial copy", "Album (2018)"),
+    "Unknown artist": ("suggested", "Duplicate files in one folder", None),
+    "Credits": ("suggested", "Identical audio", None),
 }
 
 
 @pytest.fixture(scope="module")
 def loose(scan):
-    return {c["artist"]: c for c in scan("loose")["clusters"]}
+    return {c["artist"]: c for c in scan()["clusters"]}
 
 
 def test_every_artist_found(loose):
@@ -59,13 +61,6 @@ def test_same_folder_keeps_lossless(loose):
     row = loose["Band"]["rows"][0]
     picked = [f["name"] for f in row["files"] if f["suggested"]]
     assert picked == ["02 Two.m4a"]
-
-
-@pytest.mark.parametrize("mode", ["same-folder", "cross-folder"])
-def test_other_modes_run(scan, mode):
-    s = scan(mode)
-    assert s["status"] == "done", s["error"]
-    assert s["mode"] == mode
 
 
 def test_keeps_the_copy_that_fits_the_folder(loose):
@@ -180,3 +175,24 @@ def test_title_key(app_mod):
     assert k("Rest (with Samm Henshaw)") == k("Rest") == k("Rest [feat. X]") == k("Rest ft. X")
     assert k("Rest (Live)") != k("Rest")
     assert k("Featuring Song") == "featuring song"
+
+
+def test_untagged_copies_are_found(loose):
+    c = loose["Unknown artist"]
+    assert [f["name"] for r in c["rows"] for f in r["files"] if f["suggested"]] == ["Song (1).flac"]
+
+
+def test_differing_track_credits_are_found(loose):
+    c = loose["Credits"]
+    assert {f["rel"] for r in c["rows"] for f in r["files"]} == {
+        "Credits/Album (2021)/03 Song.flac", "Credits/Album (2021) (Tidal)/03 Song.flac"}
+
+
+def test_group_files_unions_keys(app_mod):
+    base = dict(disc=1, track=3, album="A", albumartist="X", folder="X/A")
+    a = dict(base, rel="X/A/03 S.flac", title="S", artist="X")
+    b = dict(base, rel="X/B/03 S.flac", folder="X/B", title="S", artist="X, Y")  # album key
+    c = dict(base, rel="X/B/S (1).flac", folder="X/B", title="", artist="", track=None)  # folder key
+    d = dict(base, rel="Z/Q.flac", folder="Z", title="Other", artist="Z")
+    groups = app_mod.group_files([a, b, c, d])
+    assert [sorted(f["rel"] for f in g) for g in groups] == [["X/A/03 S.flac", "X/B/03 S.flac", "X/B/S (1).flac"]]

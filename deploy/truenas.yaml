@@ -14,13 +14,8 @@ services:
       - TZ=America/Los_Angeles
       # Only needed for a reverse-proxy domain name, e.g. dupes.example.com.
       # - ALLOWED_HOSTS=dupes.example.com
-      # Optional Navidrome mode. Separate compose projects can't resolve each
+      # Optional Lidarr source lookup. Separate TrueNAS apps can't resolve each
       # other by container name, so use the NAS IP.
-      - NAVIDROME_URL=http://10.0.9.101:4533
-      - NAVIDROME_USER=dupes
-      - NAVIDROME_PASSWORD=change_me
-      - NAVIDROME_MUSIC_ROOT=/music
-      # Optional Lidarr source lookup.
       - LIDARR_URL=http://10.0.9.101:8686
       - LIDARR_API_KEY=paste_lidarr_key_here
       - LIDARR_MUSIC_ROOT=/data/media/music
@@ -28,7 +23,5 @@ services:
       - /mnt/ssd-pool/apps/music-dupes/config:/config
       # Keep this ONE read-write mount so quarantine stays an instant rename.
       - /mnt/tank/media/music:/music
-      # Fallback only, used if the NAVIDROME_URL/USER/PASSWORD vars are unset.
-      # - /mnt/ssd-pool/apps/navidrome:/navidrome:ro
     ports:
       - 8095:8095

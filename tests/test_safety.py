@@ -1,8 +1,9 @@
 """Regression tests for the file-safety issues (GitHub issues #1-#7).
 
 Each test builds its own album under "Zz Safety/" in the shared fixture
-library, scans in same-folder mode so nothing else groups with it, and cleans
-up after itself (including any quarantine batches it created).
+library, retags its copies with an artist and title nothing else uses so they
+only group with each other, and cleans up after itself (including any
+quarantine batches it created).
 """
 import json
 import os
@@ -29,11 +30,25 @@ def album(lib, client):
     shutil.rmtree(root, ignore_errors=True)
 
 
+def own(*paths):
+    """Give test copies tags no fixture uses, so they only match each other."""
+    import mutagen
+    for p in paths:
+        st = os.stat(p)
+        a = mutagen.File(p)
+        for k, v in {"artist": "Zz Safety", "albumartist": "Zz Safety",
+                     "album": "Safety", "title": "Solo"}.items():
+            a[k] = v
+        a.save()
+        os.utime(p, (st.st_atime, st.st_mtime))
+
+
 def two_copies(lib, folder):
     src = lib[0] / SRC
     a, b = folder / "02 Two.flac", folder / "02 Two (1).flac"
     shutil.copy2(src, a)
     shutil.copy2(src, b)
+    own(a, b)
     return a, b
 
 
@@ -42,7 +57,7 @@ def rel(lib, path):
 
 
 def cluster(scan, lib, folder):
-    s = scan("same-folder")
+    s = scan()
     want = rel(lib, folder)
     hits = [c for c in s["clusters"] if c["editions"][0]["folder"] == want]
     return hits[0] if hits else None
@@ -57,6 +72,7 @@ def suggested(c):
 def test_symlinked_copy_is_never_a_copy(client, scan, lib, album):
     real = album / "02 Two.flac"
     shutil.copy2(lib[0] / SRC, real)
+    own(real)
     os.symlink("02 Two.flac", album / "02 Two (1).flac")
     assert cluster(scan, lib, album) is None
     # and nothing will act on the link, even if asked directly
@@ -226,6 +242,7 @@ def test_truncated_flac_goes_to_review(scan, lib, album):
     bad, good = album / "08 Free Bird.flac", album / "08 Free Bird (1).flac"
     bad.write_bytes(data[: len(data) // 3])
     good.write_bytes(data)
+    own(bad, good)
     os.utime(bad, (1, 1))
     c = cluster(scan, lib, album)
     assert (c["kind"], c["reason"]) == ("manual", "Possibly damaged copy")
@@ -275,7 +292,7 @@ def bits(path):
 
 def test_upgrade_in_place_and_undo(client, scan, lib):
     music = lib[0]
-    scan("loose")
+    scan()
     better, album = f"{TIDARR}/02 Runaway.flac", f"{LIDARR}/02 Runaway.flac"
     assert bits(music / better) == 24 and bits(music / album) == 16
     r = client.post("/api/upgrade", json={"rel": better})
@@ -295,7 +312,7 @@ def test_upgrade_in_place_and_undo(client, scan, lib):
 
 
 def test_upgrade_refuses_what_it_wasnt_offered(client, scan):
-    scan("loose")
+    scan()
     album = f"{LIDARR}/02 Runaway.flac"  # the lower-quality copy has no upgrade
     assert client.post("/api/upgrade", json={"rel": album}).status_code == 400
     assert client.post("/api/upgrade", json={"rel": "../../etc/passwd"}).status_code == 400
@@ -303,7 +320,7 @@ def test_upgrade_refuses_what_it_wasnt_offered(client, scan):
 
 def test_upgrade_refuses_changed_files(client, scan, lib):
     music = lib[0]
-    scan("loose")
+    scan()
     better, album = music / TIDARR / "12 Creature.flac", music / LIDARR / "12 Creature.flac"
     st = os.stat(album)
     os.utime(album, (st.st_atime, st.st_mtime + 5))

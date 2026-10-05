@@ -28,10 +28,9 @@ def app_mod(lib):
     # app.py reads its config from the environment at import time.
     music, config = lib
     os.environ.update(MUSIC_DIR=str(music), CONFIG_DIR=str(config))
-    for k in ("NAVIDROME_URL", "NAVIDROME_USER", "NAVIDROME_PASSWORD",
-              "LIDARR_URL", "LIDARR_API_KEY"):
+    for k in ("NAVIDROME_URL", "NAVIDROME_USER", "NAVIDROME_PASSWORD", "NAVIDROME_DB",
+              "NAVIDROME_MUSIC_ROOT", "LIDARR_URL", "LIDARR_API_KEY"):
         os.environ.pop(k, None)
-    os.environ["NAVIDROME_DB"] = str(config / "no-navidrome.db")
     return importlib.import_module("app")
 
 
@@ -43,8 +42,8 @@ def client(app_mod):
 
 @pytest.fixture(scope="session")
 def scan(client):
-    def run(mode="loose"):
-        r = client.post("/api/scan", json={"mode": mode})
+    def run():
+        r = client.post("/api/scan", json={})
         assert r.status_code == 200, r.text
         deadline = time.time() + 60
         while client.get("/api/scan").json()["status"] == "scanning":
