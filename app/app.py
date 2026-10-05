@@ -291,11 +291,14 @@ def save_json(path, data):
 
 
 def load_file(rel):
-    """Our file dict for a library-relative path, or None if unreadable/gone."""
-    p = os.path.join(MUSIC, rel)
+    """Our file dict for a library-relative path, or None if unreadable/gone.
+    Symlinks, quarantined files and paths outside the library are never copies."""
     try:
+        p = library_path(rel)
+        if not os.path.isfile(p):
+            return None
         st = os.stat(p)
-    except OSError:
+    except (ValueError, OSError):
         return None
     info = CACHE.get(rel, st.st_mtime, st.st_size)
     if info is None:
@@ -449,7 +452,7 @@ def navidrome_groups():
     """Groups of rels Navidrome shows as the same track in the same album."""
     source = navidrome_source()
     songs = nd_songs_api() if source == "api" else nd_songs_db()
-    buckets, seen, found = defaultdict(list), 0, 0
+    buckets, seen, found, rels = defaultdict(list), 0, 0, set()
     for s in songs:
         seen += 1
         p = os.path.normpath(s["path"] or "")
@@ -457,6 +460,9 @@ def navidrome_groups():
         if rel.startswith("..") or not os.path.exists(os.path.join(MUSIC, rel)):
             continue
         found += 1
+        if rel in rels:  # overlapping libraries list one file twice
+            continue
+        rels.add(rel)
         key = (s["album_id"], s["disc"] or 1, s["track"], norm(s["title"]))
         buckets[key].append((rel, s["album_id"]))
     if source == "api" and seen >= 20 and found < seen / 2:
@@ -704,8 +710,10 @@ def walk_audio():
         dirs[:] = [x for x in dirs
                    if not x.startswith(".") and os.path.join(d, x) != QDIR]
         for n in files:
-            if not n.startswith(".") and os.path.splitext(n)[1].lower() in AUDIO_EXT:
-                yield os.path.join(d, n)
+            p = os.path.join(d, n)
+            if (not n.startswith(".") and os.path.splitext(n)[1].lower() in AUDIO_EXT
+                    and not os.path.islink(p)):
+                yield p
 
 
 def run_scan(mode):
@@ -786,8 +794,12 @@ def inside(path, root):
 
 
 def library_path(rel):
-    p = os.path.realpath(os.path.join(MUSIC, rel))
-    if not inside(p, MUSIC) or inside(p, QDIR):
+    """Absolute path for a library-relative one. Refuses paths outside the
+    library, inside quarantine, or reached through a symlink: realpath() would
+    turn "move the link" into "move the file it points to"."""
+    p = os.path.normpath(os.path.join(MUSIC, rel))
+    if (os.path.realpath(p) != p or p == MUSIC or not inside(p, MUSIC)
+            or inside(p, QDIR)):
         raise ValueError("path is outside the library")
     return p
 
