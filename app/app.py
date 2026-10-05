@@ -12,6 +12,7 @@ batch. Quarantine is a rename into a hidden folder inside the library mount.
 """
 import errno
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -31,7 +32,7 @@ from statistics import mean
 
 import mutagen
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from mutagen.id3 import ID3
 from mutagen.mp4 import MP4Tags
 from pydantic import BaseModel
@@ -61,6 +62,13 @@ ND_CLIENT = "music-dupes"
 LIDARR_URL = os.environ.get("LIDARR_URL", "").rstrip("/")
 LIDARR_KEY = os.environ.get("LIDARR_API_KEY", "")
 LIDARR_ROOT = os.path.normpath(os.environ.get("LIDARR_MUSIC_ROOT", "/data/media/music"))
+
+# Hostnames the UI may be reached by, besides IPs, single-label names and
+# private suffixes (see host_allowed). Comma-separated; "*" turns the check off.
+ALLOWED_HOSTS = {h.strip().lower().rstrip(".") for h in
+                 os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()}
+LAN_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
+                ".localdomain", ".localhost")
 
 AUDIO_EXT = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".aac",
              ".wav", ".aiff", ".aif", ".wma"}
@@ -898,6 +906,48 @@ if not os.path.exists(SOURCES):
 CACHE = TagCache(os.path.join(CONFIG, "tags.db"))
 
 app = FastAPI(title="music-dupes")
+
+
+def host_allowed(host):
+    """DNS rebinding needs a public domain name pointed at your LAN, so by
+    default only IPs, single-label names and private suffixes get in. Anything
+    else (a reverse proxy's hostname) has to be listed in ALLOWED_HOSTS."""
+    if "*" in ALLOWED_HOSTS:
+        return True
+    host = (host or "").strip().lower()
+    if host.startswith("["):  # [::1]:8095
+        name = host[1:host.find("]")] if "]" in host else ""
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    name = name.rstrip(".")
+    if not name:
+        return False
+    if name in ALLOWED_HOSTS:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    return name == "localhost" or "." not in name or name.endswith(LAN_SUFFIXES)
+
+
+@app.middleware("http")
+async def request_guard(request, call_next):
+    """No auth, so make sure only this app's own page can drive the API."""
+    host = request.headers.get("host", "")
+    if not host_allowed(host):
+        return PlainTextResponse(
+            f"music-dupes doesn't answer to the hostname {host!r}. If that's your "
+            "reverse proxy, add it to the ALLOWED_HOSTS environment variable.", 403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        # application/json forces a CORS preflight, which we never approve, so
+        # other sites can't send these. FastAPI would happily parse a body
+        # with no Content-Type at all, which browsers send without asking.
+        ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ctype != "application/json" or request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse({"detail": "Requests must come from the music-dupes page."}, 403)
+    return await call_next(request)
 
 
 class ScanReq(BaseModel):

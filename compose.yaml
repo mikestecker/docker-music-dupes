@@ -16,6 +16,7 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       - TZ=${TZ:-UTC}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
       - NAVIDROME_URL=${NAVIDROME_URL:-}
       - NAVIDROME_USER=${NAVIDROME_USER:-}
       - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD:-}

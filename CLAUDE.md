@@ -10,7 +10,8 @@ Self-hosted duplicate-music finder, shipped as a Docker image. Read docs/HANDOFF
 - Bump the tag cache table name (files_v2 -> files_v3) whenever the cached dict shape changes.
 - No secrets in the repo; placeholders only. TrueNAS Custom Apps don't read .env, so deploy/truenas.yaml inlines placeholder values.
 - The image must run as any UID (users set `user:` to match their library owner). Don't write anywhere but /config, /music and /tmp.
-- Frontend API calls use relative paths (`api/...`) so sub-path reverse proxies work.
+- Frontend API calls use relative paths (`api/...`) so sub-path reverse proxies work, and every POST sends `Content-Type: application/json` (the request guard rejects anything else).
+- File operations go through `library_path()`, which refuses symlinks, quarantine and anything outside the library. Quarantine re-checks files against the disk before moving. Don't bypass either.
 
 ## Conventions
 - UI copy: sentence case, plain verbs, no em dashes, no emojis, no all-caps labels, no middle-dot separators.
