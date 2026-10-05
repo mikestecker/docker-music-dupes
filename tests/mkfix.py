@@ -122,6 +122,30 @@ def build(root):
        "Album", "2021", 3)
     mk(1900, FL, 5, "Credits/Album (2021) (Tidal)/03 Song.flac", "Song", "Credits", "Credits",
        "Album", "2021", 3)
+    # Which copy stays when the audio is identical. In each folder the copy that
+    # should lose is older and has more tags, so only the metadata checks save it.
+    t0 = 1758990000
+    extra = dict(label="L", copyright="C", bpm="90", comment="x", genre="G")
+    for i, (artist, base) in enumerate([("Peppy", 2000), ("Kaleido", 2100), ("Sourcey", 2200)]):
+        for t, title in [(1, "Opener"), (3, "Middle"), (4, "Closer")]:
+            mk(base + t, FL, 5, f"{artist}/Album (2019)/{t:02d} {title}.flac", title,
+               artist, artist, "Album", "2019", t, mtime=t0 + t)
+    # A mangled filename ("/" dropped) loses to one that matches the title.
+    mk(2002, FL, 5, "Peppy/Album (2019)/02 Queen SongsHuman.flac", "Queen Songs / human.",
+       "Peppy", "Peppy", "Album", "2019", 2, mtime=t0 + 10, **extra)
+    mk(2002, FL, 5, "Peppy/Album (2019)/02 Queen Songs + human.flac", "Queen Songs / human.",
+       "Peppy", "Peppy", "Album", "2019", 2, mtime=t0 + 600)
+    # A copy with an ISRC beats one a retag stripped.
+    mk(2102, FL, 5, "Kaleido/Album (2019)/02 Alive.flac", "Alive",
+       "Kaleido", "Kaleido", "Album", "2019", 2, mtime=t0 + 10, **extra)
+    mk(2102, FL, 5, "Kaleido/Album (2019)/02 Alive (feat. Guest).flac", "Alive (feat. Guest)",
+       "Kaleido", "Kaleido", "Album", "2019", 2, "USKK20000001", mtime=t0 + 600)
+    # Otherwise equal: the preferred source (Tidarr) wins.
+    mk(2202, FL, 5, "Sourcey/Album (2019)/02 Song.flac", "Song",
+       "Sourcey", "Sourcey", "Album", "2019", 2, mtime=t0 + 10, **extra)
+    mk(2202, FL, 5, "Sourcey/Album (2019)/02 song.flac", "Song",
+       "Sourcey", "Sourcey", "Album", "2019", 2, mtime=t0 + 600,
+       compatible_brands="mp41dashcmfc", major_brand="iso8")
 
 
 if __name__ == "__main__":

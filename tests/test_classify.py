@@ -22,6 +22,9 @@ EXPECTED = {
     "Partly": ("suggested", "Complete album covers a partial copy", "Album (2018)"),
     "Unknown artist": ("suggested", "Duplicate files in one folder", None),
     "Credits": ("suggested", "Identical audio", None),
+    "Peppy": ("suggested", "Duplicate files in one folder", None),
+    "Kaleido": ("suggested", "Duplicate files in one folder", None),
+    "Sourcey": ("suggested", "Duplicate files in one folder", None),
 }
 
 
@@ -196,3 +199,49 @@ def test_group_files_unions_keys(app_mod):
     d = dict(base, rel="Z/Q.flac", folder="Z", title="Other", artist="Z")
     groups = app_mod.group_files([a, b, c, d])
     assert [sorted(f["rel"] for f in g) for g in groups] == [["X/A/03 S.flac", "X/B/03 S.flac", "X/B/S (1).flac"]]
+
+
+@pytest.mark.parametrize("artist,kept,removed,why", [
+    ("Peppy", "02 Queen Songs + human.flac", "02 Queen SongsHuman.flac", "filename matches its title"),
+    ("Kaleido", "02 Alive (feat. Guest).flac", "02 Alive.flac", "has an ISRC"),
+    ("Sourcey", "02 song.flac", "02 Song.flac", "from Tidarr, a preferred source"),
+])
+def test_keeper_by_metadata(loose, artist, kept, removed, why):
+    files = {f["name"]: f for r in loose[artist]["rows"] for f in r["files"]}
+    assert [n for n, f in files.items() if f["suggested"]] == [removed]
+    assert files[kept]["keep_why"] == why
+    assert files[removed]["keep_why"] == ""
+
+
+def test_prefer_sources_can_be_turned_off(app_mod, scan, monkeypatch):
+    monkeypatch.setattr(app_mod, "PREFER_SOURCES", [])
+    s = scan()
+    c = next(c for c in s["clusters"] if c["artist"] == "Sourcey")
+    files = {f["name"]: f for r in c["rows"] for f in r["files"]}
+    assert [n for n, f in files.items() if f["suggested"]] == ["02 song.flac"]
+    assert files["02 Song.flac"]["keep_why"] == "more complete tags"
+
+
+def test_source_rank_order(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "PREFER_SOURCES", ["tidarr", "qobuz"])
+    r = app_mod.source_rank
+    assert r("Tidarr") == r("Tidarr (SABnzbd) via Lidarr") == 2
+    assert r("Qobuz") == 1 and r("MusicBrainz-tagged") == r(None) == 0
+
+
+@pytest.mark.parametrize("name,title,want", [
+    ("07 Queen Songs + human.flac", "Queen Songs / human.", True),
+    ("07 Queen SongsHuman.flac", "Queen Songs / human.", False),
+    ("01 The Beauty Between (feat. Andy Mineo).flac", "The Beauty Between (feat. Andy Mineo)", True),
+    ("03 - What's Up.flac", "What\u2019s Up?", True),
+    ("Song.flac", "", None),
+])
+def test_name_matches_title(app_mod, name, title, want):
+    assert app_mod.name_matches_title({"rel": f"A/B/{name}", "title": title}) is want
+
+
+def test_untouched_tags_beat_a_lidarr_retag(app_mod):
+    base = dict(rel="A/02 X.flac", title="X", isrc="", source="Tidarr", tags={}, mtime=1,
+                lossless=True, bits=16, rate=44100, kbps=900)
+    retagged = dict(base, retag={"date": "2026-10-01", "fields": [], "scrubbed": True})
+    assert app_mod.keep_rank(base) > app_mod.keep_rank(retagged)

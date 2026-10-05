@@ -194,6 +194,7 @@ Everything is set with environment variables. Only the mounts are required.
 | Variable | Default | What it does |
 |---|---|---|
 | `TZ` | `UTC` | Timezone for timestamps and quarantine batch names |
+| `PREFER_SOURCES` | `Tidarr` | When copies are otherwise equal, keep the one whose Source label contains the first of these (comma-separated, e.g. `Tidarr,Qobuz`). Matches "Tidarr" and "Tidarr (SABnzbd) via Lidarr" alike. Empty turns it off. |
 | `ALLOWED_HOSTS` | | Extra hostnames the UI answers to, comma-separated, e.g. `dupes.example.com`. IPs, single-word names (`truenas`) and `.local`/`.lan`/`.home.arpa`/`.internal` names always work. `*` turns the check off. See [Reverse proxy](#reverse-proxy). |
 | `PORT` | `8095` | Port the app listens on **inside** the container. You usually change the host side of the port mapping instead. |
 | `MUSIC_DIR` | `/music` | Library path inside the container |
@@ -298,6 +299,18 @@ Then, per album pair:
 Last check: if the edition it would keep has a lower-quality copy of any track than the one it would remove (say a CD-quality deluxe vs a hi-res standard), the whole album gets bumped to Review. When that's a partial folder holding hi-res copies of a CD-quality album, the reason says so, and the better file gets a **Replace the album's copy** button: it moves into the album under the album copy's name and the lower-quality copy goes to quarantine. Restore (or Undo) puts both back.
 
 Titles that differ only by a featured artist (`Rest` vs `Rest (with Samm Henshaw)`, `feat.`, `ft.`) count as the same track, with a "Credits differ" note.
+
+**Which copy stays.** Within a folder the keeper is ranked by, in order:
+
+1. Quality class (hi-res, then CD-quality lossless, then lossy).
+2. Fit with the folder (below).
+3. A filename that matches its title tag. `Queen Songs + human.flac` matches the title `Queen Songs / human.`; `Queen SongsHuman.flac` doesn't.
+4. An ISRC, when another copy has none (Lidarr retags often strip them).
+5. Your `PREFER_SOURCES` (Tidarr by default).
+6. Tags Lidarr didn't rewrite.
+7. Then exact sample rate, no ` (1)` in the name, more tags, older file.
+
+The kept copy says why, from the first step that separated it from the other: "Kept: has an ISRC", "Kept: filename matches its title" and so on. Newer isn't better on its own: a re-download can carry a mangled name.
 
 Within a folder, ties on quality go to the copy that fits in: named like the other tracks (`01-03 Title` vs `03 Title`), written in the same download batch, and with a filename that agrees with its own track tags. Each copy shows a line saying how it fits, and a later stray re-download gets marked "Doesn't match the folder". 44.1 kHz and 48 kHz at the same bit depth count as the same quality, so a stray at 48 kHz doesn't outrank the album's 44.1 kHz copy.
 
