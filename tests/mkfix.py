@@ -1,6 +1,7 @@
 """Build the fixture library: short sine-wave files with exact tags covering
 every duplicate pattern the app handles (see EXPECTED in tests/test_classify.py).
-Needs ffmpeg.
+Needs ffmpeg. The fingerprint cases use 20s melodies (mel()), since a steady
+tone or a 5s file is too little for Chromaprint to tell apart.
 
 Identical frequency + duration produces identical FLAC MD5s, which is how the
 "identical audio" cases are made.
@@ -16,9 +17,16 @@ HR = ["-c:a", "flac", "-sample_fmt", "s32", "-ar", "48000"]
 AAC = ["-c:a", "aac", "-b:a", "256k"]
 
 
+def mel(a, b):
+    """A lavfi source for a non-repeating three-voice melody; (a, b) pick the tune."""
+    v = lambda amp, base, rate, k, m: (f"{amp}*sin(2*PI*{base}*pow(2,mod(floor(t*{rate})*"
+                                       f"floor(t*{rate})*{k},{m})/12)*t)")
+    return f"aevalsrc='{v(0.25, 220, 3, a, 13)}+{v(0.2, 330, 1.5, b, 11)}+{v(0.15, 110, 0.75, 5, 12)}'"
+
+
 def build(root):
     def mk(freq, codec, dur, path, title, artist, aa, album, date, track, isrc=None,
-           mtime=None, **extra):
+           mtime=None, af=None, **extra):
         p = os.path.join(root, path)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         md = dict(title=title, artist=artist, album_artist=aa, album=album,
@@ -26,8 +34,10 @@ def build(root):
         if isrc:
             md["ISRC"] = isrc
         md.update(extra)
-        args = ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
-                "-i", f"sine=f={freq}:d={dur}"] + codec
+        src = f"{freq}:d={dur}" if isinstance(freq, str) else f"sine=f={freq}:d={dur}"
+        args = ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src] + codec
+        if af:
+            args += ["-af", af]
         for k, v in md.items():
             args += ["-metadata", f"{k}={v}"]
         subprocess.run(args + [p], check=True)
@@ -178,6 +188,24 @@ def build(root):
            "Album", "1984", t, f"GBRM8400000{t}")
         mk(2610 + t, FL, 5, f"Remas/Album (Remastered) (1984)/{t:02d} {title}.flac", title,
            "Remas", "Remas", "Album (Remastered)", "1984", t, f"GBRM8400000{t}")
+
+    # Fingerprints. No ISRCs and different masters (one copy 1 dB quieter), so
+    # tags and checksums can't confirm these; the audio can.
+    for t, (title, tune) in enumerate([("Glass", (7, 5)), ("Paper", (3, 2))], 1):
+        for folder, date, af in [("Echoes (2019)", "2019", None), ("Echoes (2021)", "2021", "volume=-1dB")]:
+            mk(mel(*tune), FL, 20, f"Printz/{folder}/{t:02d} {title}.flac", title, "Printz", "Printz",
+               "Echoes", date, t, af=af)
+    # Same ISRC and length, but different songs: the tags were copied wrong.
+    for folder, tune in [("Mixup (2016)", (7, 5)), ("Mixup (2016) (1)", (2, 9))]:
+        mk(mel(*tune), FL, 20, f"Swapt/{folder}/01 Same.flac", "Same", "Swapt", "Swapt", "Mixup",
+           "2016", 1, "USSW10000001")
+    # A clean version (three words muted, Tidal's advisory tag says clean) next
+    # to the explicit one.
+    mk(mel(4, 6), FL, 20, "Cleanly/Words (2020)/01 Talk.flac", "Talk", "Cleanly", "Cleanly",
+       "Words", "2020", 1, ITUNESADVISORY="1")
+    mk(mel(4, 6), FL, 20, "Cleanly/Words (2020) (Tidal)/01 Talk.flac", "Talk",
+       "Cleanly", "Cleanly", "Words", "2020", 1, ITUNESADVISORY="2",
+       af="volume=enable='between(t,6,6.6)+between(t,10,10.6)+between(t,14,14.6)':volume=0")
 
 
 if __name__ == "__main__":

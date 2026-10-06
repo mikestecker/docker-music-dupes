@@ -6,6 +6,8 @@
 #   cp app/app.py app/index.html /srv/music-dupes/app/
 #
 # Updating = copy new app.py / index.html over and restart the container.
+# The stock image has no fpcalc, so acoustic fingerprints are skipped (the scan
+# says so). Use the published image if you want them.
 services:
   music-dupes:
     image: python:3.12-slim

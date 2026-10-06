@@ -19,6 +19,8 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
       - PREFER_SOURCES=${PREFER_SOURCES:-Tidarr}
       - PREFER_REMASTERS=${PREFER_REMASTERS:-true}
+      - FINGERPRINT=${FINGERPRINT:-report}
+      - FINGERPRINT_WORKERS=${FINGERPRINT_WORKERS:-}
       - LIDARR_URL=${LIDARR_URL:-}
       - LIDARR_API_KEY=${LIDARR_API_KEY:-}
       - LIDARR_MUSIC_ROOT=${LIDARR_MUSIC_ROOT:-/data/media/music}
@@ -29,3 +31,7 @@ services:
       - ${MUSIC_PATH:?Set MUSIC_PATH in .env to your music library}:/music
     ports:
       - "${PORT:-8095}:8095"
+    # Optional caps on what the container may use. Fingerprinting runs one
+    # fpcalc per CPU it's allowed, so `cpus` is the main knob.
+    # cpus: "4"
+    # mem_limit: 1g

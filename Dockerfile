@@ -17,6 +17,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# fpcalc (Chromaprint) for acoustic fingerprints. Optional at runtime: the app
+# skips fingerprints when it's missing.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libchromaprint-tools \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 

@@ -1,5 +1,6 @@
 """Expected classification for the fixture library built by tests/mkfix.py."""
 import os
+import shutil
 
 import pytest
 
@@ -29,6 +30,10 @@ EXPECTED = {
     "Dlx": ("suggested", "Complete album covers a partial copy", "Album (2019)"),
     "Remas": ("suggested", "Same recordings", "Album (Remastered) (1984)"),
     "Hymnal": ("suggested", "Complete album covers a partial copy", "Hymns - Take the World, but Give Me Jesus (2010)"),
+    # FINGERPRINT=report (the default): fingerprints are shown, not used.
+    "Printz": ("manual", "Couldn't confirm same recordings", None),
+    "Swapt": ("suggested", "Same recordings", None),
+    "Cleanly": ("manual", "Clean and explicit versions", None),
 }
 
 
@@ -316,7 +321,8 @@ def test_untouched_edition_beats_lidarr_retag(app_mod):
     ]
     rows = [[f("A/Pure (2014)", None), f("A/Hymns (2010)", {"date": "x"})]]
     evs = [{"damaged": False, "isrc_conflict": False, "spread": 0, "confirmed": "identical",
-            "identical": True, "differs": False, "has_isrc": False}]
+            "identical": True, "differs": False, "has_isrc": False,
+            "clean_mix": False, "fp_veto": False}]
     kind, reason, _, keeper = app_mod.classify(eds, rows, evs, single=False)
     assert (kind, reason, keeper) == ("suggested", "Identical audio", "A/Pure (2014)")
 
@@ -333,3 +339,69 @@ def test_prefer_remasters_can_be_turned_off(app_mod, scan, monkeypatch):
     monkeypatch.setattr(app_mod, "PREFER_REMASTERS", False)
     c = next(c for c in scan()["clusters"] if c["artist"] == "Remas")
     assert [e["folder"] for e in c["editions"] if e["keep"]] == ["Remas/Album (1984)"]
+
+
+needs_fpcalc = pytest.mark.skipif(not shutil.which("fpcalc"), reason="fpcalc isn't installed")
+
+
+@needs_fpcalc
+def test_report_mode_shows_what_fingerprints_would_change(loose):
+    assert loose["Printz"]["fp_would"] == {"kind": "suggested", "reason": "Same recordings"}
+    assert loose["Swapt"]["fp_would"] == {"kind": "manual", "reason": "Audio doesn't match"}
+    assert loose["Cleanly"]["fp_would"] is None
+    assert all(r["fingerprint"] == "Fingerprint match 100%, full length."
+               for r in loose["Printz"]["rows"])
+    assert "different audio" in loose["Swapt"]["rows"][0]["fingerprint"]
+    assert "clean or edited" in loose["Cleanly"]["rows"][0]["fingerprint"]
+    # 5s tones are too short to judge: no verdict, nothing would change.
+    assert loose["Blindside"]["fp_would"] is None
+    assert loose["Blindside"]["rows"][0]["fingerprint"] == "Too short to compare fingerprints."
+
+
+@needs_fpcalc
+def test_fingerprints_on_confirm_and_veto(app_mod, scan, monkeypatch):
+    monkeypatch.setattr(app_mod, "FINGERPRINT", "on")
+    s = scan()
+    assert s["total"] == s["scanned"] == len(list(app_mod.walk_audio()))  # not the fingerprint count
+    got = {c["artist"]: c for c in s["clusters"]}
+    c = got["Printz"]
+    assert (c["kind"], c["reason"]) == ("suggested", "Same recordings")
+    assert "acoustic fingerprint matches over the full length" in c["detail"]
+    assert [os.path.basename(e["folder"]) for e in c["editions"] if e["keep"]] == ["Echoes (2019)"]
+    for r in c["rows"]:
+        assert [f["suggested"] for f in r["files"]].count(True) == 1
+    c = got["Swapt"]
+    assert (c["kind"], c["reason"]) == ("manual", "Audio doesn't match")
+    assert not any(f["suggested"] for r in c["rows"] for f in r["files"])
+    assert "Fingerprints differ" in [ch["text"] for ch in c["rows"][0]["evidence"]]
+    assert (got["Cleanly"]["kind"], got["Cleanly"]["reason"]) == ("manual", "Clean and explicit versions")
+    # Too-short fixtures abstain, so every other decision is unchanged.
+    for artist, (kind, reason, _) in EXPECTED.items():
+        if artist not in ("Printz", "Swapt"):
+            assert (got[artist]["kind"], got[artist]["reason"]) == (kind, reason), artist
+
+
+def test_fingerprints_off(app_mod, scan, monkeypatch):
+    monkeypatch.setattr(app_mod, "FINGERPRINT", "off")
+    got = {c["artist"]: c for c in scan()["clusters"]}
+    assert got["Printz"]["fp_would"] is None
+    assert all(r["fingerprint"] == "" for c in got.values() for r in c["rows"])
+    assert got["Cleanly"]["reason"] == "Clean and explicit versions"  # a tag rule, not a fingerprint one
+
+
+def test_fingerprint_compare_verdicts(app_mod):
+    import random
+    rnd = random.Random(1)
+    a = [rnd.getrandbits(32) for _ in range(400)]
+    flip = lambda x, n: x ^ sum(1 << b for b in rnd.sample(range(32), n))
+    near = [flip(x, 2) for x in a]                      # another encode of the same audio
+    other = [rnd.getrandbits(32) for _ in range(400)]  # unrelated audio
+    padded = [rnd.getrandbits(32) for _ in range(9)] + a  # same audio after a short gap
+    dipped = [flip(x, 14) if 160 <= i < 176 else x for i, x in enumerate(a)]  # a muted word
+    cmp = app_mod.fp_compare
+    assert app_mod.fp_verdict(cmp(a, near)) == "match"
+    assert app_mod.fp_verdict(cmp(a, padded)) == "match"
+    assert app_mod.fp_verdict(cmp(a, other)) == "differs"
+    assert app_mod.fp_verdict(cmp(a, a[:280])) == "edit"
+    assert app_mod.fp_verdict(cmp(a, dipped)) == "dips"
+    assert cmp(a, a[:40]) is None  # too short to say

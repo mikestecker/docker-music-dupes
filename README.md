@@ -27,6 +27,7 @@ It's built for libraries that get fed by several pipelines at once (Lidarr, Tida
   - [Build the image yourself](#build-the-image-yourself)
   - [No image at all](#no-image-at-all)
 - [Configuration](#configuration)
+- [Acoustic fingerprints](#acoustic-fingerprints)
 - [Optional integrations](#optional-integrations)
 - [Using it](#using-it)
 - [How it decides](#how-it-decides)
@@ -196,6 +197,8 @@ Everything is set with environment variables. Only the mounts are required.
 | `TZ` | `UTC` | Timezone for timestamps and quarantine batch names |
 | `PREFER_SOURCES` | `Tidarr` | When copies are otherwise equal, keep the one whose Source label contains the first of these (comma-separated, e.g. `Tidarr,Qobuz`). Matches "Tidarr" and "Tidarr (SABnzbd) via Lidarr" alike. Empty turns it off. |
 | `PREFER_REMASTERS` | `true` | When editions of one album are otherwise equal, keep the one named "Remaster(ed)". Set `false` to prefer originals (many remasters are louder and more compressed). |
+| `FINGERPRINT` | `report` | Acoustic fingerprints of every file in a duplicate group, over the full song. `report` shows what they found and what they'd change without acting on it, `on` lets them confirm and veto duplicates, `off` skips them. See [Acoustic fingerprints](#acoustic-fingerprints). |
+| `FINGERPRINT_WORKERS` | CPUs the container may use | How many fpcalc processes run at once. The default reads the container's CPU limit (`cpus:`), not the host's core count. |
 | `ALLOWED_HOSTS` | | Extra hostnames the UI answers to, comma-separated, e.g. `dupes.example.com`. IPs, single-word names (`truenas`) and `.local`/`.lan`/`.home.arpa`/`.internal` names always work. `*` turns the check off. See [Reverse proxy](#reverse-proxy). |
 | `PORT` | `8095` | Port the app listens on **inside** the container. You usually change the host side of the port mapping instead. |
 | `MUSIC_DIR` | `/music` | Library path inside the container |
@@ -217,6 +220,25 @@ The `*_MUSIC_ROOT` variables matter when your apps mount the same library at dif
 | `sources.json` | Your rules for labelling where files came from (see below) |
 
 ---
+
+## Acoustic fingerprints
+
+After grouping duplicates by tags, the scan runs [Chromaprint](https://acoustid.org/chromaprint)'s `fpcalc` on every file in a group, over the whole song, and compares each pair. It's the same fingerprint AcoustID and MusicBrainz Picard use. It hears the audio, not the tags, so a hi-res FLAC and an MP3 of the same master match, and a Lidarr retag that stripped the ISRC doesn't matter.
+
+Each track shows a quiet line with the result, like "Fingerprint match 99%, full length." What the comparisons can say:
+
+- **Match:** the audio agrees over the full length. With `FINGERPRINT=on` that confirms the same recording, so the cluster can be suggested.
+- **Edit:** the audio agrees, but only over part of the longer copy (a radio edit, a cut version).
+- **Short passages differ:** the rest agrees, but a few seconds here and there don't, which is what muted or swapped words look like. Often a clean version.
+- **Differs:** different audio, whatever the tags say.
+
+Fingerprints only confirm or veto copies that were already grouped. They never pick the keeper (quality, edition and source rules still do), never override "different album artists" or "different albums", and can't tell remasters apart (that's what the FLAC checksums are for). Files shorter than about 10 seconds aren't compared.
+
+**Report mode first.** The default, `FINGERPRINT=report`, shows the fingerprint lines and, on each card it would change, a note like "With fingerprints on, this would move to Suggested". Look through those on your library, then set `FINGERPRINT=on`.
+
+**Cost.** Only files in duplicate groups are fingerprinted, and results are cached in `tags.db`, so later scans only fingerprint new or changed files. A full-length fingerprint takes well under a second per file on a modern CPU, longer for hi-res. The scan shows progress and a **Skip fingerprinting** button; skipped tracks are judged as if fingerprints were off. fpcalc runs at low priority, one process per CPU the container may use. To cap it, set `cpus:` (and `mem_limit:` if you like) on the container, or `FINGERPRINT_WORKERS`. Each fpcalc uses a few tens of MB of memory.
+
+The published image includes fpcalc. The [no-image setup](#no-image-at-all) doesn't, so fingerprints are skipped there.
 
 ## Optional integrations
 
@@ -287,13 +309,16 @@ The short version, in order of strength:
 
 1. **Identical audio.** FLAC files store an MD5 of the decoded audio. Same MD5 means bit-identical audio, no matter how the tags or file names differ.
 2. **Same ISRC** and lengths within 1.5 seconds means the same recording, even across formats.
-3. **Same disc/track slot in one folder** with lengths within a second.
+3. **Same acoustic fingerprint** over the full length (with `FINGERPRINT=on`). For copies with no shared ISRC, like a Lidarr retag next to a Tidarr download.
+4. **Same disc/track slot in one folder** with lengths within a second.
 
 Then, per album pair:
 
 - Different album artists → Review.
 - Different albums (an album and a single, a compilation or a best-of that share a recording) → **Other albums**, nothing selected. Both releases stay whole. Album names are compared without edition wording (deluxe, remaster, special edition, a year), and close spellings like `Fractured Heart` / `Fractioned Heart` still count as one album.
 - Any track with different ISRCs, or lengths more than 2.5s apart → Review.
+- One copy tagged clean or edited (advisory tag, or "(Clean)" / "(Edited)" in the title) and another not → Review. They're different releases.
+- With `FINGERPRINT=on`, any track whose fingerprints disagree → Review: different audio, a cut version, or short passages that differ (often a clean edit).
 - One folder only holds tracks that are all in a more complete copy of the same album (say Tidarr grabbed three songs Lidarr already has) → suggest keeping the complete album. Every track must be within a second, and audio that's provably different is never covered.
 - One edition is deluxe/expanded/special and the other isn't, and the deluxe one is at least as complete → suggest keeping the deluxe one.
 - Every track proven identical or the same recording → suggest keeping the best quality, then the most tracks, then your preferred source, then tags Lidarr didn't rewrite, then a remastered edition (`PREFER_REMASTERS`), then the richest tags, then the earliest year. The card names the step that decided it. When the checksums show two different masters of the same recording, tracks get a "Different master" chip and the card asks you to listen first.

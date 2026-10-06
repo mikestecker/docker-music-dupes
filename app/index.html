@@ -115,6 +115,8 @@
   .f-meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top: 2px; }
   .lower { font-size: 12px; color: var(--remove); }
   .stray { font-size: 12px; color: var(--warn); cursor: help; }
+  .r-fp { font-size: 12px; color: var(--muted); margin: 0 0 6px; max-width: 46ch; }
+  .would { margin: 4px 0 0; color: var(--muted); font-size: 13px; font-style: italic; }
   .f-fit { font-size: 12px; color: var(--muted); margin-top: 2px; }
   .f-fit.good { color: var(--keep); }
   .f-fit.warn { color: var(--warn); }
@@ -204,7 +206,7 @@
   <section id="dupes-view">
     <div class="controls">
       <button class="btn primary" id="scan">Scan library</button>
-      <p class="scan-help">Finds the same track wherever it is: matching artist and title, the same slot on the same album even when the credits differ, and stray copies in one folder, tagged or not. Tags and audio data decide what gets suggested.</p>
+      <p class="scan-help">Finds the same track wherever it is: matching artist and title, the same slot on the same album even when the credits differ, and stray copies in one folder, tagged or not. Tags, audio checksums and acoustic fingerprints decide what gets suggested.</p>
     </div>
     <div class="status" id="status"></div>
     <div class="warnings" id="warnings"></div>
@@ -262,6 +264,7 @@ const plural = (n, w, p) => `${n.toLocaleString()} ${n === 1 ? w : (p || w + "s"
 const base = p => p.split("/").pop();
 const parent = p => p.split("/").slice(0, -1).join("/");
 const LETTERS = "ABCDEFGH";
+const SEC_NAMES = { suggested: "Suggested", manual: "Review", other: "Other albums" };
 const PLAY = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1l7 4-7 4z"/></svg>';
 const PAUSE = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1h2v8H2zM6 1h2v8H6z"/></svg>';
 
@@ -386,9 +389,12 @@ function renderStatus(s) {
     el.textContent = "No scan yet. Pick how to match tracks, then scan your library.";
   } else if (s.status === "scanning") {
     const pct = s.total ? Math.round(100 * s.scanned / s.total) : 0;
-    const what = s.phase === "Reading tags" && s.total
-      ? `Reading tags, ${s.scanned.toLocaleString()} of ${s.total.toLocaleString()} files` : (s.phase || "Working");
-    el.innerHTML = `${esc(what)}<div class="meter"><div style="width:${s.phase === "Reading tags" ? pct : 4}%"></div></div>`;
+    const counted = (s.phase === "Reading tags" || s.phase === "Fingerprinting") && s.total;
+    const what = counted
+      ? `${s.phase}, ${s.scanned.toLocaleString()} of ${s.total.toLocaleString()} files` : (s.phase || "Working");
+    const skip = s.phase === "Fingerprinting" && !s.skip_fp
+      ? ` <button class="link" id="skip-fp">Skip fingerprinting</button>` : "";
+    el.innerHTML = `${esc(what)}${skip}<div class="meter"><div style="width:${counted ? pct : 4}%"></div></div>`;
   } else if (s.status === "error") {
     el.textContent = `The scan stopped: ${s.error}`;
   } else {
@@ -460,6 +466,7 @@ function cardHtml(c, ci) {
         <div class="by">${esc(c.artist)}</div>
         <span class="reason ${sec}">${esc(c.reason)}</span>
         <p class="detail">${esc(c.detail)}</p>
+        ${c.fp_would ? `<p class="would">With fingerprints on, this would move to ${esc(SEC_NAMES[c.fp_would.kind] || c.fp_would.kind)}: ${esc(c.fp_would.reason)}.</p>` : ""}
       </div>
       <div class="album-side">
         <div class="album-stats">
@@ -526,6 +533,7 @@ function rowHtml(c, r, ri) {
       <div class="m-title">
         <div class="t">${esc(r.title)}</div>
         <div class="chips">${r.evidence.map(ch => `<span class="chip ${ch.tone}" title="${esc(ch.why)}">${esc(ch.text)}</span>`).join("")}</div>
+        ${r.fingerprint ? `<div class="r-fp">${esc(r.fingerprint)}</div>` : ""}
         <button class="link" data-act="tags" data-ri="${ri}" aria-expanded="${tagsOpen}">${tagsOpen ? "Hide tags" : "Compare tags"}</button>
       </div>
       ${cells}
@@ -736,6 +744,12 @@ $("#clear-all").addEventListener("click", () => {
 });
 
 
+$("#status").addEventListener("click", async e => {
+  if (e.target.id !== "skip-fp") return;
+  e.target.disabled = true;
+  try { await api("api/scan/skip-fingerprints", {}); } catch (err) { toast(err.message); }
+});
+
 $("#scan").addEventListener("click", async () => {
   try {
     await api("api/scan", {});
@@ -910,7 +924,8 @@ document.querySelectorAll("[data-tab]").forEach(t => t.addEventListener("click",
 // ---------- boot ----------
 
 api("api/info").then(i => {
-  $("#lib").textContent = `Library at ${i.music}`;
+  const fp = { on: "Fingerprints on", report: "Fingerprints in report mode" }[i.fingerprint];
+  $("#lib").textContent = `Library at ${i.music}` + (fp ? `. ${fp}, ${plural(i.fp_workers, "worker")}.` : "");
 }).catch(() => {});
 refresh().catch(err => toast(err.message));
 </script>
