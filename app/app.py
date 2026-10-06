@@ -72,6 +72,12 @@ LAN_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
 PREFER_SOURCES = [x.strip().lower() for x in
                   os.environ.get("PREFER_SOURCES", "Tidarr").split(",") if x.strip()]
 
+# Prefer a remastered edition when editions are otherwise equal. A tiebreak
+# only: remasters aren't always better (many are louder and more compressed).
+PREFER_REMASTERS = os.environ.get("PREFER_REMASTERS", "true").strip().lower() not in (
+    "0", "false", "no", "off")
+REMASTER_RE = re.compile(r"\bremaster(?:ed)?\b", re.I)
+
 AUDIO_EXT = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".aac",
              ".wav", ".aiff", ".aif", ".wma"}
 LOSSLESS_EXT = {"flac", "wav", "aiff", "aif"}
@@ -556,7 +562,8 @@ def row_evidence(g, single):
     elif identical:
         add("good", "Identical audio", "The FLAC audio checksums match, so the decoded audio is bit-for-bit the same.")
     elif all(md5s) and same_fmt:
-        add("neutral", "Audio differs", "Same format, but the decoded audio isn't bit-identical. Usually a different master, remaster or edit.")
+        add("warn", "Different master", "Same format, but the decoded audio isn't bit-identical: "
+            "a different master, remaster or edit. Listen before choosing.")
     if same_isrc:
         add("good", "Same ISRC", f"Both carry recording code {isrcs[0]}.")
     elif isrc_conflict:
@@ -870,6 +877,7 @@ def build_cluster(folders, rows, ignored, folder_cache):
             "album": first["album"] or os.path.basename(folder),
             "year": year_of(first),
             "deluxe": bool(DELUXE_RE.search(f"{first['album']} {os.path.basename(folder)}")),
+            "remaster": bool(REMASTER_RE.search(f"{first['album']} {os.path.basename(folder)}")),
             "tracks": len(folder_files(folder, folder_cache)),
             "format": summ["format"], "detail": summ["detail"], "tier": summ["tier"],
             "format_count": summ["format_count"],
@@ -1002,6 +1010,25 @@ def partial_copy(eds, rows, evs):
     return whole, parts
 
 
+def edition_rank(e, best_count):
+    """Which edition of one album to keep when the audio is confirmed the same.
+    EDITION_REASONS names each position."""
+    return (best_count[e["folder"]], e["tracks"], source_rank(e["source"]), e["untouched"],
+            e.get("remaster", False) and PREFER_REMASTERS, e["tag_count"],
+            -int(e["year"] or 9999))
+
+
+EDITION_REASONS = [
+    "the best quality on more tracks",
+    "the most tracks",
+    "a preferred source",
+    "tags Lidarr didn't rewrite",
+    "the remastered edition",
+    "the richest tags",
+    "the earliest year",
+]
+
+
 def classify(eds, rows, evs, single):
     """-> (kind, reason, detail, keeper folder or None)"""
     if not single and len({norm(e["artist"]) for e in eds}) > 1:
@@ -1073,10 +1100,8 @@ def classify(eds, rows, evs, single):
             top = max(qclass(f) for f in g)
             for folder in {f["folder"] for f in g if qclass(f) == top}:
                 best_count[folder] += 1
-        keeper = max(eds, key=lambda e: (best_count[e["folder"]], e["tracks"],
-                                         source_rank(e["source"]), e["untouched"],
-                                         e["tag_count"],
-                                         -int(e["year"] or 9999)))
+        rank = lambda e: edition_rank(e, best_count)
+        keeper = max(eds, key=rank)
         ident = all(e["identical"] for e in evs)
         reason = "Identical audio" if ident else "Same recordings"
         why = ("Every track's decoded audio is bit-for-bit identical."
@@ -1084,10 +1109,18 @@ def classify(eds, rows, evs, single):
         years = {e["year"] for e in eds if e["year"]}
         if len(years) > 1:
             why += f" Release years differ ({', '.join(sorted(years))}), but it's the same audio, not a re-recording."
+        runner = max((e for e in eds if e is not keeper), key=rank)
+        decided = next((i for i, (a, b) in enumerate(zip(rank(keeper), rank(runner))) if a != b), None)
+        kept = (f" Kept {os.path.basename(keeper['folder'])}: {EDITION_REASONS[decided]}."
+                if decided is not None else "")
+        if any(e["differs"] for e in evs):
+            kept += (" Some tracks are different masters of the same recording, so listen "
+                     "before quarantining.")
         return ("suggested", reason,
                 f"{why} Keeping the edition with the best quality, then the most "
-                "tracks, then a preferred source, then tags Lidarr didn't rewrite, then the "
-                "richest tags, then the earliest year.", keeper["folder"])
+                "tracks, then a preferred source, then tags Lidarr didn't rewrite, then a "
+                "remaster, then the richest tags, then the earliest year." + kept,
+                keeper["folder"])
 
     missing = sum(not e["has_isrc"] and not e["identical"] for e in evs)
     return ("manual", "Couldn't confirm same recordings",
