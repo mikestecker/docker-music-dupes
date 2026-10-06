@@ -22,6 +22,7 @@ Self-hosted duplicate-music finder, shipped as a Docker image. README.md is the 
 - Different album artists, or anything the app can't confirm: Review, nothing selected, with diffs, raw tags and the player.
 - Within a folder, keep the copy that fits the folder (naming, download batch, filename agrees with its tags).
 - Show which pipeline each file came from (Lidarr history, Tidarr container tags, user rules).
+- Acoustic fingerprints (fpcalc, full length, files in duplicate groups only) confirm or veto a group's match; they never pick the keeper or override different album artists / different albums. Clean vs explicit (advisory tag or "(Clean)") always goes to Review. `FINGERPRINT=report` is the default until it's tuned on real libraries.
 - Prefer Tidal/Tidarr metadata over Lidarr/MusicBrainz retags (`PREFER_SOURCES=Tidarr`, untouched tags beat retagged). Newer isn't better on its own; a filename that matches its title and an ISRC come first.
 - One-click cleanup, always reversible first.
 
@@ -30,7 +31,7 @@ Self-hosted duplicate-music finder, shipped as a Docker image. README.md is the 
 - Pinned deps live in requirements.txt: fastapi==0.115.6 uvicorn==0.34.0 mutagen==1.47.0. Python 3.12. Keep the pins in deploy/compose.no-build.yaml in sync.
 - Never use FLAC bitrate as a quality signal (it's only used as an integrity check for truncated files).
 - Grouping (`group_keys`/`group_files`) only finds candidates; confirmation and keeper choice happen in `row_evidence`, `classify` and `keep_rank`. Folder fit never confirms a duplicate.
-- Bump the tag cache table name (files_v2 -> files_v3) whenever the cached dict shape changes.
+- Bump the tag cache table name (files_v2 -> files_v3) whenever the cached dict shape changes. Fingerprints have their own table (prints_v1); bump that when their format changes.
 - No secrets in the repo; placeholders only. TrueNAS Custom Apps don't read .env, so deploy/truenas.yaml inlines placeholder values.
 - The image must run as any UID (users set `user:` to match their library owner). Don't write anywhere but /config, /music and /tmp.
 - Frontend API calls use relative paths (`api/...`) so sub-path reverse proxies work, and every POST sends `Content-Type: application/json`.
@@ -41,5 +42,5 @@ Self-hosted duplicate-music finder, shipped as a Docker image. README.md is the 
 - Every destructive action gets an Undo toast where possible.
 
 ## Testing
-- `pytest` (needs ffmpeg). tests/mkfix.py builds the fixture library; expected results are `EXPECTED` in tests/test_classify.py. tests/test_safety.py covers each safety fix.
+- `pytest` (needs ffmpeg; fingerprint tests also need fpcalc from libchromaprint-tools). tests/mkfix.py builds the fixture library; expected results are `EXPECTED` in tests/test_classify.py. tests/test_safety.py covers each safety fix.
 - tests/e2e.py is a Playwright flow against a running server on a fresh fixture library. Check light and dark, desktop and 390px wide.

@@ -13,17 +13,22 @@ batch. Quarantine is a rename into a hidden folder inside the library mount.
 import errno
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import unicodedata
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
+from array import array
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from statistics import mean
 
@@ -77,6 +82,53 @@ PREFER_SOURCES = [x.strip().lower() for x in
 PREFER_REMASTERS = os.environ.get("PREFER_REMASTERS", "true").strip().lower() not in (
     "0", "false", "no", "off")
 REMASTER_RE = re.compile(r"\bremaster(?:ed)?\b", re.I)
+
+# Acoustic fingerprints (Chromaprint's fpcalc) of every file in a duplicate
+# group, over the whole song. "on" uses them to confirm or veto duplicates,
+# "report" (the default) only shows what they found and what they would
+# change, "off" skips them. Without fpcalc they're skipped either way.
+FINGERPRINT = os.environ.get("FINGERPRINT", "report").strip().lower()
+if FINGERPRINT not in ("on", "report", "off"):
+    FINGERPRINT = "on" if FINGERPRINT in ("1", "true", "yes") else (
+        "off" if FINGERPRINT in ("0", "false", "no") else "report")
+FPCALC = shutil.which("fpcalc")
+FP_TIMEOUT = 600  # seconds per file
+FP_MIN = 80       # fingerprint items (~10s) needed before a comparison means anything
+FP_MATCH = 0.85   # bit agreement for "same audio" (unrelated audio sits near 0.6)
+FP_DIFF = 0.70    # below this the audio is different
+FP_COVER = 0.95   # share of the longer copy the match has to span
+FP_WIN = 16       # items per window (~2s) when looking for short differing passages
+FP_DIP = 0.06     # a window this far below the song's typical agreement differs
+FP_SHIFT = 120    # alignment search, in items (~15s of padding either way)
+CLEAN_RE = re.compile(r"[(\[]\s*(?:clean|edited)(?:\s+version)?\s*[)\]]", re.I)
+
+
+def container_cpus():
+    """CPUs this container may use: the cgroup quota (docker's `cpus:`) and the
+    CPU set, not the host's core count, which os.cpu_count() reports."""
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    for path, period in (("/sys/fs/cgroup/cpu.max", None),
+                         ("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "/sys/fs/cgroup/cpu/cpu.cfs_period_us")):
+        try:
+            with open(path) as fh:
+                parts = fh.read().split()
+            if period:
+                with open(period) as fh:
+                    parts.append(fh.read().strip())
+            quota, per = parts[0], int(parts[1])
+            if quota not in ("max", "-1") and per > 0:
+                n = min(n, max(1, math.ceil(int(quota) / per)))
+            break
+        except (OSError, ValueError, IndexError):
+            continue
+    return max(1, n)
+
+
+_workers = os.environ.get("FINGERPRINT_WORKERS", "").strip()
+FP_WORKERS = int(_workers) if _workers.isdigit() and int(_workers) > 0 else container_cpus()
 
 AUDIO_EXT = {".flac", ".m4a", ".mp3", ".ogg", ".opus", ".aac",
              ".wav", ".aiff", ".aif", ".wma"}
@@ -339,6 +391,10 @@ class TagCache:
         # v2: full raw tags + stream data. Old v1 rows are simply ignored.
         self.db.execute("CREATE TABLE IF NOT EXISTS files_v2 ("
                         "path TEXT PRIMARY KEY, mtime REAL, size INTEGER, data TEXT)")
+        # Fingerprints live apart from the tags so turning them on doesn't
+        # re-read every file's tags. An empty blob means fpcalc couldn't read it.
+        self.db.execute("CREATE TABLE IF NOT EXISTS prints_v1 ("
+                        "path TEXT PRIMARY KEY, mtime REAL, size INTEGER, data BLOB)")
         self.lock = threading.Lock()
 
     def get(self, rel, mtime, size):
@@ -352,6 +408,24 @@ class TagCache:
         with self.lock:
             self.db.execute("INSERT OR REPLACE INTO files_v2 VALUES (?,?,?,?)",
                             (rel, mtime, size, json.dumps(data)))
+
+    def get_print(self, rel, mtime, size):
+        with self.lock:
+            row = self.db.execute(
+                "SELECT data FROM prints_v1 WHERE path=? AND mtime=? AND size=?",
+                (rel, mtime, size)).fetchone()
+        if row is None:
+            return None
+        a = array("I")
+        if row[0]:
+            a.frombytes(zlib.decompress(row[0]))
+        return list(a)
+
+    def put_print(self, rel, mtime, size, fp):
+        blob = zlib.compress(array("I", fp).tobytes()) if fp else b""
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO prints_v1 VALUES (?,?,?,?)",
+                            (rel, mtime, size, blob))
 
     def commit(self):
         with self.lock:
@@ -537,7 +611,141 @@ def year_of(f):
     return m.group(1) if m else ""
 
 
-def row_evidence(g, single):
+# ---------- acoustic fingerprints ----------
+
+def fpcalc(path):
+    """The whole song's raw Chromaprint fingerprint: a list of 32-bit ints, about
+    8 per second. [] when fpcalc can't decode it, None when it timed out."""
+    cmd = [FPCALC, "-raw", "-length", "0", path]
+    if shutil.which("nice"):
+        cmd = ["nice", "-n", "10"] + cmd  # leave the CPU to media servers
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=FP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return []
+    for line in r.stdout.splitlines():
+        if line.startswith("FINGERPRINT="):
+            try:
+                return [int(x) & 0xFFFFFFFF for x in line[12:].split(",") if x]
+            except ValueError:
+                return []
+    return []
+
+
+def load_print(f):
+    """A file's fingerprint from the cache, else from fpcalc (and cached)."""
+    try:
+        p = library_path(f["rel"])
+        st = os.stat(p)
+    except (ValueError, OSError):
+        return None
+    fp = CACHE.get_print(f["rel"], st.st_mtime, st.st_size)
+    if fp is None:
+        fp = fpcalc(p)
+        if fp is None:
+            return None
+        CACHE.put_print(f["rel"], st.st_mtime, st.st_size, fp)
+    return fp
+
+
+def fp_compare(a, b):
+    """Line two fingerprints up and measure how well they agree.
+    -> {sim, cover, dips} or None when either is too short to say."""
+    if len(a) < FP_MIN or len(b) < FP_MIN:
+        return None
+    # Equal values point at the alignment; try the likeliest few, else every
+    # shift in range. Score by agreement beyond chance so a tiny overlap of a
+    # repeated chorus can't beat the real alignment.
+    pos = defaultdict(list)
+    for j, v in enumerate(b):
+        pos[v].append(j)
+    # Values repeated all over (silence, a held chord) say nothing about alignment
+    # and would make this quadratic, so they don't vote.
+    votes = Counter(j - i for i, v in enumerate(a) if len(pos.get(v, ())) <= 8
+                    for j in pos[v] if abs(j - i) <= FP_SHIFT)
+    tops = [o for o, n in votes.most_common(3) if n >= 0.05 * min(len(a), len(b))]
+    shifts = {o + d for o in tops for d in (-1, 0, 1)} if tops else range(-FP_SHIFT, FP_SHIFT + 1)
+    best = None
+    for off in shifts:
+        lo, hi = max(0, -off), min(len(a), len(b) - off)
+        if hi - lo < FP_MIN:
+            continue
+        errs = [(a[i] ^ b[i + off]).bit_count() for i in range(lo, hi)]
+        sim = 1 - sum(errs) / (32 * len(errs))
+        gain = len(errs) * (sim - 0.5)
+        if best is None or gain > best[0]:
+            best = (gain, sim, errs)
+    if best is None:
+        return None
+    _, sim, errs = best
+    # Short passages that disagree while the rest agrees: muted or swapped
+    # words (a clean edit), a changed ending. The first and last windows are
+    # skipped, since fades and padding differ between copies.
+    wins = [1 - sum(errs[i:i + FP_WIN]) / (32 * FP_WIN)
+            for i in range(0, len(errs) - FP_WIN + 1, FP_WIN)][1:-1]
+    typical = sorted(wins)[len(wins) // 2] if wins else sim
+    dips = sum(w < typical - FP_DIP for w in wins)
+    return {"sim": sim, "cover": len(errs) / max(len(a), len(b)), "dips": dips}
+
+
+def fp_verdict(cmp):
+    """match / edit / dips / differs / unsure for one comparison."""
+    if cmp["sim"] < FP_DIFF:
+        return "differs"
+    if cmp["sim"] < FP_MATCH:
+        return "unsure"
+    if cmp["cover"] < FP_COVER:
+        return "edit"
+    if cmp["dips"]:
+        return "dips"
+    return "match"
+
+
+def fp_evidence(g):
+    """The row's fingerprint result: every pair compared, the worst one wins.
+    -> {verdict, text} where verdict is None when there's nothing to go on."""
+    if FINGERPRINT == "off" or not FPCALC:
+        return {"verdict": None, "text": ""}
+    if any(f.get("fp") is None for f in g):
+        return {"verdict": None, "text": "No fingerprint: a copy was skipped or timed out."}
+    if any(not f["fp"] for f in g):
+        return {"verdict": None, "text": "No fingerprint: fpcalc couldn't decode a copy."}
+    order = ["differs", "edit", "dips", "unsure", "match"]
+    worst = None
+    for i, x in enumerate(g):
+        for y in g[i + 1:]:
+            c = fp_compare(x["fp"], y["fp"])
+            if c is None:
+                return {"verdict": None, "text": "Too short to compare fingerprints."}
+            v = fp_verdict(c)
+            if worst is None or order.index(v) < order.index(worst[0]):
+                worst = (v, c)
+    v, c = worst
+    pct = f"{c['sim'] * 100:.0f}%"
+    text = {
+        "match": f"Fingerprint match {pct}, full length.",
+        "edit": f"Fingerprints agree {pct}, but only over {c['cover'] * 100:.0f}% of the "
+                "longer copy: an edit or a cut version.",
+        "dips": f"Fingerprints agree {pct}, but {c['dips']} short "
+                f"passage{'s differ' if c['dips'] > 1 else ' differs'}: possibly a clean "
+                "or edited version.",
+        "differs": f"Fingerprints differ ({pct} agreement): different audio.",
+        "unsure": f"Fingerprints partly agree ({pct}): not enough to call it either way.",
+    }[v]
+    return {"verdict": v, "text": text}
+
+
+def clean_marked(f):
+    t = f["tags"]
+    return (t.get("itunesadvisory") == "2" or t.get("advisory") == "2"
+            or bool(CLEAN_RE.search(f"{f['title']} {f['album']}")))
+
+
+def row_evidence(g, single, fp=None, use_fp=False):
+    """use_fp: let the fingerprint result (fp, from fp_evidence) confirm or veto."""
+    fp = fp or {"verdict": None, "text": ""}
     md5s = [f["md5"] for f in g]
     identical = all(md5s) and len(set(md5s)) == 1
     # Integrity, not quality: a FLAC's MD5 and length live in its header, so a
@@ -581,21 +789,33 @@ def row_evidence(g, single):
     if len(titles) > 1:
         add("neutral", "Credits differ", "The titles differ only by a featured artist: "
             + " vs ".join(sorted({f["title"] for f in g})) + ".")
-    blocked = isrc_conflict or spread > LEN_TOL or damaged
+    cleans = {clean_marked(f) for f in g}
+    clean_mix = len(cleans) > 1
+    if clean_mix:
+        add("warn", "Clean and explicit", "One copy is tagged as a clean or edited version "
+            "and another isn't. Those are different releases, so both stay unless you pick.")
+    # Bit-identical audio needs no fingerprint; otherwise one that disagrees
+    # (other audio, a cut, short passages that differ) blocks the match.
+    fp_veto = use_fp and not identical and fp["verdict"] in ("differs", "edit", "dips")
+    if fp_veto:
+        add("warn", "Fingerprints differ", fp["text"])
+    blocked = isrc_conflict or spread > LEN_TOL or damaged or clean_mix or fp_veto
     if identical:
         confirmed = "identical"
     elif blocked:
         confirmed = None
     elif same_isrc and spread <= 1.5:
         confirmed = "recording"
+    elif use_fp and fp["verdict"] == "match":
+        confirmed = "audio"  # same audio by fingerprint, no ISRC to go on
     elif single and same_slot and spread <= 1:
         confirmed = "slot"  # same track slot in the same album folder
     else:
         confirmed = None
     return {"chips": chips, "identical": identical, "damaged": damaged,
             "differs": bool(all(md5s) and same_fmt and not identical and not damaged),
-            "isrc_conflict": isrc_conflict,
-            "spread": spread, "blocked": blocked, "confirmed": confirmed,
+            "isrc_conflict": isrc_conflict, "clean_mix": clean_mix, "fp_veto": fp_veto,
+            "fp": fp, "spread": spread, "blocked": blocked, "confirmed": confirmed,
             "has_isrc": all(isrcs)}
 
 
@@ -821,7 +1041,7 @@ def upgrades(g, ev, fits, album_folder):
     the album (a partial folder, or a stray in the album's own folder) can take
     the place of the album's lower-quality copy: same name, its own extension.
     Only for the same take (lengths within 1s, nothing contradicting)."""
-    if ev["spread"] > 1.0 or ev["isrc_conflict"] or ev["damaged"] or ev["differs"]:
+    if ev["spread"] > 1.0 or ev["blocked"] or ev["differs"]:
         return {}
     out = {}
     for p in g:
@@ -895,8 +1115,15 @@ def build_cluster(folders, rows, ignored, folder_cache):
     known = max((e["total"] for e in eds if e["total"]), default=None)
     for e in eds:
         e["album_total"] = e["total"] or (known if one_album else None)
-    evs = [row_evidence(g, single) for g in rows]
+    fps = [fp_evidence(g) for g in rows]
+    evs = [row_evidence(g, single, fp, FINGERPRINT == "on") for g, fp in zip(rows, fps)]
     kind, reason, detail, keeper = classify(eds, rows, evs, single)
+    # Report mode: what turning fingerprints on would change about this cluster.
+    would = None
+    if FINGERPRINT == "report" and any(fp["verdict"] for fp in fps):
+        alt = classify(eds, rows, [row_evidence(g, single, fp, True) for g, fp in zip(rows, fps)], single)
+        if alt[:2] != (kind, reason):
+            would = {"kind": alt[0], "reason": alt[1]}
 
     fits = {f["rel"]: folder_fit(f, g, folder_cache) for g in rows for f in g}
 
@@ -965,10 +1192,11 @@ def build_cluster(folders, rows, ignored, folder_cache):
         h = g[0]
         out_rows.append({"title": h["title"] or os.path.basename(h["rel"]),
                          "track": h["track"], "disc": h["disc"],
-                         "evidence": ev["chips"], "files": files})
+                         "evidence": ev["chips"], "fingerprint": ev["fp"]["text"],
+                         "files": files})
     key = "\n".join(sorted(f["rel"] for g in rows for f in g))
     return {"key": key, "kind": kind, "reason": reason, "detail": detail,
-            "ignored": key in ignored, "editions": eds, "rows": out_rows,
+            "ignored": key in ignored, "editions": eds, "rows": out_rows, "fp_would": would,
             "artist": eds[0]["artist"], "album": eds[0]["album"]}
 
 
@@ -1005,7 +1233,7 @@ def partial_copy(eds, rows, evs):
         if not any(f["folder"] == whole["folder"] for f in g):
             return None
         # same take, and never audio we can prove is different
-        if ev["spread"] > 1.0 or ev["isrc_conflict"] or ev["damaged"] or ev["differs"]:
+        if ev["spread"] > 1.0 or ev["blocked"] or ev["differs"]:
             return None
     return whole, parts
 
@@ -1057,6 +1285,17 @@ def classify(eds, rows, evs, single):
         return ("manual", "Track lengths differ",
                 f"Lengths differ by more than {LEN_TOL:g}s on {n_len} of {len(evs)} "
                 "tracks, so these probably aren't the same take. Listen to compare.", None)
+    n_clean = sum(e["clean_mix"] for e in evs)
+    if n_clean:
+        return ("manual", "Clean and explicit versions",
+                f"On {n_clean} of {len(evs)} tracks one copy is tagged as a clean or edited "
+                "version and another isn't. Both stay unless you pick.", None)
+    n_fp = sum(e["fp_veto"] for e in evs)
+    if n_fp:
+        return ("manual", "Audio doesn't match",
+                f"The acoustic fingerprints disagree on {n_fp} of {len(evs)} tracks: "
+                "different audio, a cut version, or short passages that differ (often a "
+                "clean edit). Listen to compare.", None)
     if single:
         if all(e["confirmed"] for e in evs):
             return ("suggested", "Duplicate files in one folder",
@@ -1094,7 +1333,7 @@ def classify(eds, rows, evs, single):
                 "selected.", whole["folder"])
 
 
-    if all(e["confirmed"] in ("identical", "recording") for e in evs):
+    if all(e["confirmed"] in ("identical", "recording", "audio") for e in evs):
         best_count = Counter()
         for g in rows:
             top = max(qclass(f) for f in g)
@@ -1104,8 +1343,11 @@ def classify(eds, rows, evs, single):
         keeper = max(eds, key=rank)
         ident = all(e["identical"] for e in evs)
         reason = "Identical audio" if ident else "Same recordings"
-        why = ("Every track's decoded audio is bit-for-bit identical."
-               if ident else "Every track carries the same ISRC with matching length.")
+        how = {e["confirmed"] for e in evs} - {"identical"}
+        why = ("Every track's decoded audio is bit-for-bit identical." if ident else
+               "Every track carries the same ISRC with matching length." if how == {"recording"} else
+               "Every track's acoustic fingerprint matches over the full length." if how == {"audio"} else
+               "Every track matches by ISRC or by acoustic fingerprint, with matching length.")
         years = {e["year"] for e in eds if e["year"]}
         if len(years) > 1:
             why += f" Release years differ ({', '.join(sorted(years))}), but it's the same audio, not a re-recording."
@@ -1130,7 +1372,7 @@ def classify(eds, rows, evs, single):
 
 # ---------- scan ----------
 
-STATE = {"status": "idle", "scan_id": None, "phase": "",
+STATE = {"status": "idle", "scan_id": None, "phase": "", "skip_fp": False,
          "scanned": 0, "total": 0, "unreadable": 0, "started": None,
          "finished": None, "error": None, "warnings": [], "clusters": []}
 LOCK = threading.Lock()
@@ -1150,6 +1392,40 @@ def walk_audio():
             if (not n.startswith(".") and os.path.splitext(n)[1].lower() in AUDIO_EXT
                     and not os.path.islink(p)):
                 yield p
+
+
+def fingerprint_groups(groups, warnings):
+    """Fingerprint every file in a duplicate group (f["fp"]), in parallel.
+    Files left when the user skips this, or that time out, have none."""
+    if FINGERPRINT == "off":
+        return
+    if not FPCALC:
+        warnings.append("FINGERPRINT is on but fpcalc isn't installed, so fingerprints were "
+                        "skipped. The image includes it; a no-build install needs "
+                        "libchromaprint-tools.")
+        return
+    todo = [f for g in groups for f in g]
+    update(phase="Fingerprinting", scanned=0, total=len(todo))
+    done = 0
+    with ThreadPoolExecutor(max_workers=FP_WORKERS) as pool:
+        futs = {pool.submit(load_print, f): f for f in todo}
+        for fut in futs:
+            if STATE["skip_fp"]:
+                pool.shutdown(wait=True, cancel_futures=True)
+                break
+            futs[fut]["fp"] = fut.result()
+            done += 1
+            if done % 25 == 0:
+                update(scanned=done)
+                CACHE.commit()
+    for fut, f in futs.items():
+        if "fp" not in f and fut.done() and not fut.cancelled():
+            f["fp"] = fut.result()
+    CACHE.commit()
+    if STATE["skip_fp"]:
+        n = sum("fp" not in f or f["fp"] is None for f in todo)
+        warnings.append(f"Fingerprinting was skipped for {n} files. Their tracks are judged "
+                        "on tags and checksums only.")
 
 
 def run_scan():
@@ -1176,6 +1452,7 @@ def run_scan():
                 CACHE.commit()
         groups = group_files(files)
         CACHE.commit()
+        fingerprint_groups(groups, warnings)
 
         update(phase="Comparing")
         for g in groups:
@@ -1190,7 +1467,7 @@ def run_scan():
         clusters = [build_cluster(list(folders), rows, ignored, counts)
                     for folders, rows in by_folders.items()]
         clusters.sort(key=lambda c: (c["artist"].casefold(), c["album"].casefold()))
-        update(status="done", phase="", scanned=STATE["total"], unreadable=bad,
+        update(status="done", phase="", scanned=len(rels), total=len(rels), unreadable=bad,
                clusters=clusters, warnings=warnings, finished=time.time())
     except Exception as e:
         update(status="error", phase="", error=str(e), finished=time.time())
@@ -1344,7 +1621,8 @@ def healthz():
 @app.get("/api/info")
 def info():
     return {"music": MUSIC, "quarantine": QDIR,
-            "lidarr": bool(LIDARR_URL and LIDARR_KEY)}
+            "lidarr": bool(LIDARR_URL and LIDARR_KEY),
+            "fingerprint": FINGERPRINT if FPCALC else "off", "fp_workers": FP_WORKERS}
 
 
 @app.get("/api/scan")
@@ -1359,10 +1637,19 @@ def start_scan(req: ScanReq | None = None):
         if STATE["status"] == "scanning":
             raise HTTPException(409, "A scan is already running.")
         STATE.update(status="scanning", scan_id=uuid.uuid4().hex,
-                     phase="Starting", scanned=0, total=0, unreadable=0,
+                     phase="Starting", skip_fp=False, scanned=0, total=0, unreadable=0,
                      started=time.time(), finished=None, error=None,
                      warnings=[], clusters=[])
     threading.Thread(target=run_scan, daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/scan/skip-fingerprints")
+def skip_fingerprints(req: ScanReq | None = None):
+    with LOCK:
+        if STATE["status"] != "scanning":
+            raise HTTPException(409, "No scan is running.")
+        STATE["skip_fp"] = True
     return {"ok": True}
 
 

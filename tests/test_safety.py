@@ -393,3 +393,36 @@ def test_retagged_date_is_ignored(app_mod, lib):
     assert text.endswith("Its date is ignored because Lidarr rewrote its tags")
     score_plain, _, text_plain = app_mod.folder_fit(stray, group, {})
     assert "added" in text_plain.lower() and score < 0.5
+
+
+def test_fingerprinting_only_reads_library_paths(app_mod, lib, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_mod, "fpcalc", lambda p: calls.append(p) or [1] * 100)
+    outside = tmp_path / "x.flac"
+    outside.write_bytes(b"x")
+    music = str(lib[0])
+    os.symlink(os.path.join(music, "Band/Album (2010)/02 Two.flac"), os.path.join(music, "link.flac"))
+    try:
+        for rel in ("../x.flac", str(outside), "link.flac", ".dupe-quarantine/x.flac"):
+            assert app_mod.load_print({"rel": rel}) is None
+        assert calls == []
+    finally:
+        os.remove(os.path.join(music, "link.flac"))
+
+
+def test_skip_fingerprints_needs_a_running_scan(client):
+    assert client.post("/api/scan/skip-fingerprints", json={}).status_code == 409
+    assert client.post("/api/scan/skip-fingerprints", content="{}").status_code == 403
+
+
+def test_fpcalc_never_goes_through_a_shell(app_mod, monkeypatch):
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(cmd=cmd, **kw)
+        raise app_mod.subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(app_mod, "FPCALC", "/usr/bin/fpcalc")
+    monkeypatch.setattr(app_mod.subprocess, "run", run)
+    assert app_mod.fpcalc("/music/a; rm -rf x.flac") is None  # a timeout is retried next scan
+    assert isinstance(seen["cmd"], list) and not seen.get("shell")
+    assert seen["cmd"][-1] == "/music/a; rm -rf x.flac" and seen["timeout"] == app_mod.FP_TIMEOUT

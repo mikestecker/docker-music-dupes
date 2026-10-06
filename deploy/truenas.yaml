@@ -18,6 +18,10 @@ services:
       - PREFER_SOURCES=Tidarr
       # On otherwise equal editions, keep the remastered one (false: originals).
       - PREFER_REMASTERS=true
+      # Acoustic fingerprints: report (show only), on (use them), or off.
+      - FINGERPRINT=report
+      # Parallel fpcalc processes; leave empty for every CPU the app may use.
+      - FINGERPRINT_WORKERS=
       # Optional Lidarr source lookup. Separate TrueNAS apps can't resolve each
       # other by container name, so use the NAS IP.
       - LIDARR_URL=http://10.0.9.101:8686
